@@ -440,6 +440,46 @@ Frontend defects:
     still cannot get a token through — the allow-list is defence in depth, not the
     gate. `Origin` is deliberately still forwarded to the backend rather than
     stripped at the BFF, so the real client origin stays auditable.
+12. **A stale session cookie rendered a permanently blank app.** Reported as
+     "nothing is shown on the screen". Three compounding causes:
+     - `DashboardLayoutWrapper` did `return null` when unauthenticated. A blank
+       page with no way out is the worst available outcome for a state the app
+       can name and explain; it now renders a "Your session has ended" panel
+       with a sign-in link.
+     - `AuthContext`'s teardown set `user = null` and navigated, but **never
+       cleared the cookie**. `proxy.js` only checks that a cookie *exists*, so a
+       dead cookie was waved into the dashboard on every reload, where `me()`
+       401'd again — which is why reloading never helped. `endSession` now calls
+       the BFF logout route, which clears the cookie whether or not the backend
+       acknowledges. The cookie is httpOnly, so that route is the only way to
+       delete it.
+     - The teardown used `router.push`, which lost a race with Next's own URL
+       reconciliation — a `replaceState` back to `/dashboard` landed *after* the
+       expiry event. Replaced with a hard `location.replace`.
+
+    Three traps in this area, each of which cost a cycle and each of which is
+    easy to reintroduce:
+     - **`AuthProvider` is in the root layout, so it mounts on `/login` too.**
+       Having no session there is the *expected* state. Treating that `me()` 401
+       as an expiry and hard-navigating back to `/login` reloads the root layout,
+       which calls `me()` again: an infinite redirect loop, observed on the wire
+       as ten `me()`+`logout()` cycles in five seconds. `PUBLIC_PATHS` now lives
+       in `lib/session.js` and is imported by both `proxy.js` and
+       `AuthContext`, so the two cannot drift, and `endSession` refuses to
+       navigate when already on a public route. `/login` now issues zero `me()`
+       calls.
+     - **`location.replace` is not queued behind an earlier one.** The demo-data
+       reset invalidates the session *during* `resetToDemoData()`, so the generic
+       expiry path fires and navigates to `/login?reset=1` — then `await logout()`
+       ran a frame later and replaced it with plain `/login`, losing the banner.
+       `endSession` latches on first call; a second call is a no-op.
+     - **The expiry teardown knows nothing of intent.** Hence `planSessionEnd`,
+       called at the *top* of `handleReset` in `Header.js` rather than after the
+       reset, so whichever teardown wins still carries `?reset=1`.
+
+    Diagnose a session problem by counting auth calls on the wire, not by reading
+    the DOM: `cdp-race.mjs` prints every `/auth/me` and `/auth/logout` with
+    timestamps for a cold load, which is what made the loop visible.
 
 ## How these were found
 

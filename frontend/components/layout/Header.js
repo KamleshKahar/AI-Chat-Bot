@@ -11,7 +11,7 @@ import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 
 export function Header({ onMenuClick }) {
-  const { user, logout } = useAuth();
+  const { user, logout, planSessionEnd } = useAuth();
   const { resetToDemoData, revision } = useData();
   const { error } = useToast();
   const [resetOpen, setResetOpen] = useState(false);
@@ -43,10 +43,18 @@ export function Header({ onMenuClick }) {
    * than letting the user get bounced by a confusing mid-session 401.
    */
   const handleReset = async () => {
+    /*
+     * Declared before the reset, not after. The reset recreates every account,
+     * so the caller's token stops resolving while `resetToDemoData()` is still
+     * in flight and the generic session-expiry teardown fires first — with no
+     * knowledge of why, it would land on a bare `/login` and the banner
+     * explaining that the data was restored would never be seen.
+     */
+    planSessionEnd('/login?reset=1');
     setResetting(true);
     try {
       await resetToDemoData();
-      await logout('/login?reset=1');
+      await logout();
     } catch (err) {
       error(
         err.message ||

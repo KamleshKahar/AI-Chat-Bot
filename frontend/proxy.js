@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { SESSION_COOKIE } from './lib/session.js';
+import { SESSION_COOKIE, isPublicPath } from './lib/session.js';
 
 /**
  * Backend-for-frontend boundary.
@@ -18,8 +18,8 @@ import { SESSION_COOKIE } from './lib/session.js';
  * real gate. A tampered cookie gets bounced here and 401'd by the API.
  */
 
-/** Routes reachable without a session. */
-const PUBLIC_PATHS = new Set(['/login']);
+/** Routes reachable without a session. Imported so it cannot drift from the
+ *  copy `AuthContext` uses — see the note in `lib/session.js`. */
 
 /** `/api/*` requests are authenticated by the header lift, not the redirect. */
 const isApiRequest = (pathname) =>
@@ -39,7 +39,7 @@ export function proxy(request) {
   }
 
   // --- Page navigation: optimistic auth redirect --------------------------
-  const isPublic = PUBLIC_PATHS.has(pathname);
+  const isPublic = isPublicPath(pathname);
 
   // Already signed in but sitting on the login page — send them to the app.
   if (isPublic && token) {

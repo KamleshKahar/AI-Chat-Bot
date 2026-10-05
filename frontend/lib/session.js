@@ -19,6 +19,23 @@ export const SESSION_COOKIE = 'flowpilot_token';
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
 
 /**
+ * Routes reachable without a session.
+ *
+ * Deliberately defined here and imported by both `proxy.js` (which bounces
+ * anonymous visitors away from the app) and `AuthContext` (which must know that
+ * having no session on one of these routes is the expected state, not an expiry
+ * to recover from). When these were kept separately, `AuthContext` treated the
+ * `me()` 401 that `/login` legitimately produces as a dead session and
+ * navigated back to `/login`, remounting the root layout and looping forever.
+ */
+export const PUBLIC_PATHS = new Set(['/login']);
+
+/** True when `pathname` is reachable without a session. */
+export function isPublicPath(pathname) {
+  return PUBLIC_PATHS.has(pathname);
+}
+
+/**
  * Upstream API origin. `serverRuntimeConfig`/`publicRuntimeConfig` were removed
  * in Next 16, so a plain env var is the only mechanism.
  */
