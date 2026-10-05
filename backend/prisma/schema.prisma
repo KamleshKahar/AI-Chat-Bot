@@ -1,0 +1,493 @@
+// FlowPilot Sales & Inventory — Prisma schema
+// Provider: MySQL 8.0+ (also runs on MariaDB 10.6+)
+//
+// Design notes
+// ------------
+// * Primary keys are BIGINT AUTO_INCREMENT internal surrogates. The human
+//   readable document code (PRD-101, CUST-001, INV-2026-009 …) lives in a
+//   separate UNIQUE `code` column and is what the API serialises as `id`, so
+//   the frontend's existing identifier handling keeps working untouched.
+// * Every money column is DECIMAL(14,2). Nothing in this schema is a float.
+// * `stock_status` (in_stock | low_stock | out_of_stock) and `Overdue`
+//   payment status are DERIVED, never stored — see repositories/*.repo.js for
+//   the SQL expressions that compute them.
+// * Historical invoices snapshot customer + product details so that later edits
+//   to the master records can never retroactively alter a legal document.
+// * Single tenant by design: no `company_id` scoping. Adding tenancy later
+//   means adding the column + a where clause in the repository layer only.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  MANAGER
+  CASHIER
+  VIEWER
+}
+
+enum CustomerStatus {
+  active
+  inactive
+}
+
+enum DiscountType {
+  percent
+  flat
+}
+
+enum TaxType {
+  CGST_SGST
+  IGST
+}
+
+/// Only three states are ever persisted. `Overdue` is computed at read time
+/// from (payment_status != PAID AND due_date < today AND balance_due > 0).
+enum PaymentStatus {
+  PENDING
+  PARTIAL
+  PAID
+}
+
+enum PaymentMethod {
+  UPI
+  CASH
+  BANK_TRANSFER
+  CHEQUE
+  CREDIT_CARD
+  COD
+}
+
+enum InvoiceStatus {
+  DRAFT
+  CONFIRMED
+  CANCELLED
+}
+
+enum StockMovementType {
+  OPENING
+  SALE
+  PURCHASE
+  ADJUSTMENT_IN
+  ADJUSTMENT_OUT
+  RETURN
+  DAMAGE
+}
+
+enum ReferenceType {
+  INVOICE
+  ADJUSTMENT
+  PURCHASE
+  RETURN
+}
+
+enum LedgerDirection {
+  IN
+  OUT
+}
+
+enum LedgerEntryType {
+  SALE_PAYMENT
+  PURCHASE_PAYMENT
+  EXPENSE
+  ADJUSTMENT
+  REFUND
+  OPENING
+}
+
+enum LedgerStatus {
+  SUCCESS
+  PENDING
+  FAILED
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy / identity
+// ---------------------------------------------------------------------------
+
+/// Exactly one row. Holds the letterhead + banking details printed on invoices.
+model CompanyProfile {
+  id                Int      @id @default(autoincrement())
+  name              String   @db.VarChar(160)
+  tagline           String?  @db.VarChar(255)
+  gstin             String?  @db.VarChar(15)
+  pan               String?  @db.VarChar(10)
+  email             String?  @db.VarChar(160)
+  phone             String?  @db.VarChar(40)
+  address           String?  @db.VarChar(255)
+  city              String?  @db.VarChar(80)
+  state             String?  @db.VarChar(80)
+  pincode           String?  @db.VarChar(6)
+  bankName          String?  @map("bank_name") @db.VarChar(120)
+  bankAccount       String?  @map("bank_account") @db.VarChar(40)
+  ifscCode          String?  @map("ifsc_code") @db.VarChar(20)
+  upiId             String?  @map("upi_id") @db.VarChar(120)
+  invoicePrefix     String   @map("invoice_prefix") @default("INV") @db.VarChar(10)
+  invoiceTerms      String?  @map("invoice_terms") @db.Text
+  paymentTermDays   Int      @map("payment_term_days") @default(15)
+  financialYearFrom Int      @map("financial_year_from") @default(4)
+  logoUrl           String?  @map("logo_url") @db.VarChar(255)
+
+  createdAt DateTime @map("created_at") @default(now()) @db.DateTime(3)
+  updatedAt DateTime @map("updated_at") @updatedAt @db.DateTime(3)
+
+  @@map("company_profile")
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  email        String    @unique @db.VarChar(160)
+  passwordHash String    @map("password_hash") @db.VarChar(255)
+  name         String    @db.VarChar(120)
+  role         Role      @default(VIEWER)
+  phone        String?   @db.VarChar(40)
+  isActive     Boolean   @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at") @db.DateTime(3)
+
+  createdAt DateTime @map("created_at") @default(now()) @db.DateTime(3)
+  updatedAt DateTime @map("updated_at") @updatedAt @db.DateTime(3)
+
+  invoices       Invoice[]
+  payments       Payment[]
+  stockMovements StockMovement[]
+  auditLogs      AuditLog[]
+
+  @@index([isActive])
+  @@map("users")
+}
+
+/// Sequential human-readable code generator (PRD-101, INV-2026-009 …).
+/// Rows are locked FOR UPDATE inside the creating transaction.
+model DocumentSequence {
+  id         Int    @id @default(autoincrement())
+  prefix     String @db.VarChar(20)
+  period     String @db.VarChar(16)
+  lastNumber Int    @default(0) @map("last_number")
+
+  @@unique([prefix, period], map: "uq_sequence_prefix_period")
+  @@map("document_sequences")
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+model Category {
+  id          Int      @id @default(autoincrement())
+  code        String   @unique @db.VarChar(20)
+  shortCode   String?  @map("short_code") @db.VarChar(20)
+  name        String   @unique @db.VarChar(120)
+  description String?  @db.VarChar(255)
+  isActive    Boolean  @default(true) @map("is_active")
+
+  createdAt DateTime @map("created_at") @default(now()) @db.DateTime(3)
+  updatedAt DateTime @map("updated_at") @updatedAt @db.DateTime(3)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(3)
+
+  products Product[]
+
+  @@index([isActive, deletedAt])
+  @@map("categories")
+}
+
+model Product {
+  id            Int     @id @default(autoincrement())
+  code          String  @unique @db.VarChar(20)
+  sku           String  @unique @db.VarChar(40)
+  name          String  @db.VarChar(255)
+  categoryId    Int     @map("category_id")
+  description   String? @db.Text
+  unit          String  @default("pcs") @db.VarChar(20)
+  hsnCode       String? @map("hsn_code") @db.VarChar(12)
+
+  mrp           Decimal @db.Decimal(14, 2)
+  sellingPrice  Decimal @map("selling_price") @db.Decimal(14, 2)
+  costPrice     Decimal @map("cost_price") @db.Decimal(14, 2)
+  taxRate       Decimal @default(18) @map("tax_rate") @db.Decimal(5, 2)
+
+  stockQuantity Int     @default(0) @map("stock_quantity")
+  minStockLevel Int     @default(10) @map("min_stock_level")
+
+  isActive Boolean @default(true) @map("is_active")
+
+  createdAt DateTime  @map("created_at") @default(now()) @db.DateTime(3)
+  updatedAt DateTime  @map("updated_at") @updatedAt @db.DateTime(3)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(3)
+
+  category      Category         @relation(fields: [categoryId], references: [id])
+  invoiceItems  InvoiceItem[]
+  stockMovement StockMovement[]
+
+  @@index([categoryId], map: "idx_products_category")
+  @@index([name], map: "idx_products_name")
+  @@index([stockQuantity], map: "idx_products_stock")
+  @@index([isActive, deletedAt], map: "idx_products_active")
+  @@map("products")
+}
+
+// ---------------------------------------------------------------------------
+// Customers
+// ---------------------------------------------------------------------------
+
+model Customer {
+  id          Int            @id @default(autoincrement())
+  code        String         @unique @db.VarChar(20)
+  name        String         @db.VarChar(160)
+  company     String?        @db.VarChar(160)
+  email       String?        @db.VarChar(160)
+  phone       String?        @db.VarChar(40)
+  address     String?        @db.VarChar(255)
+  city        String?        @db.VarChar(80)
+  state       String?        @db.VarChar(80)
+  pincode     String?        @db.VarChar(6)
+  gstin       String?        @unique @db.VarChar(15)
+  creditLimit Decimal        @default(0) @map("credit_limit") @db.Decimal(14, 2)
+  /// Dues that pre-date the system (i.e. imported from a spreadsheet). This is
+  /// an *input*, not a cache: `outstandingBalance` in the API is this figure
+  /// plus the live SUM(invoices.balance_due), so it can never drift.
+  openingBalance Decimal @default(0) @map("opening_balance") @db.Decimal(14, 2)
+  status      CustomerStatus @default(active)
+  // `dbgenerated("(CURRENT_DATE)")`, not `@default(now())`, for two reasons:
+  //   1. Prisma renders `now()` as CURRENT_TIMESTAMP(3), and MySQL 8 rejects a
+  //      fractional-second default on a DATE column (error 1067). A DATE cannot
+  //      hold sub-second precision anyway, so CURRENT_DATE is the right semantic.
+  //   2. MySQL 8 requires expression defaults to be parenthesised — bare
+  //      `DEFAULT CURRENT_DATE` is a MariaDB-ism and is a syntax error (1064).
+  // MariaDB tolerates the wrong forms; MySQL 8 rejects both.
+  joinedAt    DateTime       @default(dbgenerated("(CURRENT_DATE)")) @map("joined_at") @db.Date
+
+  createdAt DateTime  @map("created_at") @default(now()) @db.DateTime(3)
+  updatedAt DateTime  @map("updated_at") @updatedAt @db.DateTime(3)
+  deletedAt DateTime? @map("deleted_at") @db.DateTime(3)
+
+  invoices Invoice[]
+  payments Payment[]
+  ledger   LedgerEntry[]
+
+  @@index([status, deletedAt], map: "idx_customers_status")
+  @@index([name], map: "idx_customers_name")
+  @@index([joinedAt], map: "idx_customers_joined")
+  @@map("customers")
+}
+
+// ---------------------------------------------------------------------------
+// Documents — one `invoices` table backs BOTH the Sales and Invoices screens
+// ---------------------------------------------------------------------------
+
+model Invoice {
+  id            Int      @id @default(autoincrement())
+  invoiceNumber String   @unique @map("invoice_number") @db.VarChar(32)
+  saleCode      String   @unique @map("sale_code") @db.VarChar(32)
+
+  customerId Int @map("customer_id")
+
+  invoiceDate DateTime @map("invoice_date") @db.Date
+  dueDate     DateTime @map("due_date") @db.Date
+
+  // ---- money (all DECIMAL(14,2), all computed server-side) ----
+  subtotal         Decimal      @db.Decimal(14, 2)
+  discountType     DiscountType @default(percent) @map("discount_type")
+  discountValue    Decimal      @default(0) @map("discount_value") @db.Decimal(14, 2)
+  discountPercent  Decimal      @default(0) @map("discount_percent") @db.Decimal(5, 2)
+  discountAmount   Decimal      @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  taxableAmount    Decimal      @map("taxable_amount") @db.Decimal(14, 2)
+  taxType          TaxType      @default(CGST_SGST) @map("tax_type")
+  taxRate          Decimal      @default(18) @map("tax_rate") @db.Decimal(5, 2)
+  cgstAmount       Decimal      @default(0) @map("cgst_amount") @db.Decimal(14, 2)
+  sgstAmount       Decimal      @default(0) @map("sgst_amount") @db.Decimal(14, 2)
+  igstAmount       Decimal      @default(0) @map("igst_amount") @db.Decimal(14, 2)
+  taxAmount        Decimal      @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  shippingCharges  Decimal      @default(0) @map("shipping_charges") @db.Decimal(14, 2)
+  grandTotal       Decimal      @map("grand_total") @db.Decimal(14, 2)
+  paidAmount       Decimal      @default(0) @map("paid_amount") @db.Decimal(14, 2)
+  balanceDue       Decimal      @default(0) @map("balance_due") @db.Decimal(14, 2)
+
+  // `Overdue` is NEVER written here — it is derived at read time.
+  paymentStatus PaymentStatus @default(PENDING) @map("payment_status")
+  paymentMethod PaymentMethod @map("payment_method") @default(UPI)
+
+  status InvoiceStatus @default(CONFIRMED)
+  notes  String?       @db.Text
+  terms  String?       @db.Text
+
+  // ---- frozen customer snapshot (legal document requirement) ----
+  snapshotName    String? @map("snapshot_name") @db.VarChar(160)
+  snapshotCompany String? @map("snapshot_company") @db.VarChar(160)
+  snapshotEmail   String? @map("snapshot_email") @db.VarChar(160)
+  snapshotPhone   String? @map("snapshot_phone") @db.VarChar(40)
+  snapshotAddress String? @map("snapshot_address") @db.VarChar(255)
+  snapshotCity    String? @map("snapshot_city") @db.VarChar(80)
+  snapshotState   String? @map("snapshot_state") @db.VarChar(80)
+  snapshotPincode String? @map("snapshot_pincode") @db.VarChar(6)
+  snapshotGstin   String? @map("snapshot_gstin") @db.VarChar(15)
+
+  createdById Int?     @map("created_by")
+  createdAt   DateTime @map("created_at") @default(now()) @db.DateTime(3)
+  updatedAt   DateTime @map("updated_at") @updatedAt @db.DateTime(3)
+  deletedAt   DateTime? @map("deleted_at") @db.DateTime(3)
+
+  customer        Customer        @relation(fields: [customerId], references: [id])
+  createdBy       User?           @relation(fields: [createdById], references: [id])
+  items           InvoiceItem[]
+  payments        Payment[]
+  ledger          LedgerEntry[]
+
+  @@index([customerId], map: "idx_invoices_customer")
+  @@index([invoiceDate], map: "idx_invoices_date")
+  @@index([paymentStatus], map: "idx_invoices_pstatus")
+  @@index([invoiceDate, grandTotal], map: "idx_invoices_date_total")
+  @@index([deletedAt], map: "idx_invoices_deleted")
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id        Int     @id @default(autoincrement())
+  invoiceId Int     @map("invoice_id")
+  productId Int?    @map("product_id")
+
+  // frozen product snapshot
+  productName String  @map("product_name") @db.VarChar(255)
+  sku         String  @db.VarChar(40)
+  unit        String? @db.VarChar(20)
+  hsnCode     String? @map("hsn_code") @db.VarChar(12)
+
+  quantity      Int     @default(1)
+  unitPrice     Decimal @map("unit_price") @db.Decimal(14, 2)
+  discountAmount Decimal @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  taxableValue  Decimal @map("taxable_value") @db.Decimal(14, 2)
+  taxRate       Decimal @map("tax_rate") @db.Decimal(5, 2)
+  cgstAmount    Decimal @default(0) @map("cgst_amount") @db.Decimal(14, 2)
+  sgstAmount    Decimal @default(0) @map("sgst_amount") @db.Decimal(14, 2)
+  igstAmount    Decimal @default(0) @map("igst_amount") @db.Decimal(14, 2)
+  lineTotal     Decimal @map("line_total") @db.Decimal(14, 2)
+
+  sortOrder Int @default(0) @map("sort_order")
+
+  invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id])
+
+  @@index([invoiceId], map: "idx_items_invoice")
+  @@index([productId], map: "idx_items_product")
+  @@map("invoice_items")
+}
+
+model Payment {
+  id            Int      @id @default(autoincrement())
+  paymentCode   String   @unique @map("payment_code") @db.VarChar(24)
+  invoiceId     Int      @map("invoice_id")
+  customerId    Int      @map("customer_id")
+  amount        Decimal  @db.Decimal(14, 2)
+  paymentMethod PaymentMethod @map("payment_method")
+  reference     String?  @db.VarChar(80)
+  paidAt        DateTime @default(now()) @map("paid_at") @db.DateTime(3)
+  notes         String?  @db.VarChar(255)
+  createdById   Int?     @map("created_by")
+
+  createdAt DateTime @map("created_at") @default(now()) @db.DateTime(3)
+
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  customer Customer @relation(fields: [customerId], references: [id])
+  createdBy User?   @relation(fields: [createdById], references: [id])
+
+  @@index([invoiceId], map: "idx_payments_invoice")
+  @@index([customerId], map: "idx_payments_customer")
+  @@index([paidAt], map: "idx_payments_paid_at")
+  @@map("payments")
+}
+
+// ---------------------------------------------------------------------------
+// Stock ledger
+// ---------------------------------------------------------------------------
+
+model StockMovement {
+  id        Int                @id @default(autoincrement())
+  productId Int                @map("product_id")
+  type      StockMovementType
+  /// Signed delta. Negative for outbound (SALE / ADJUSTMENT_OUT / DAMAGE).
+  quantityDelta Int            @map("quantity_delta")
+  stockAfter   Int             @map("stock_after")
+  unitCost     Decimal?        @map("unit_cost") @db.Decimal(14, 2)
+  referenceType ReferenceType? @map("reference_type")
+  referenceId   String?        @map("reference_id") @db.VarChar(32)
+  reason        String?        @db.VarChar(120)
+  notes         String?        @db.VarChar(255)
+  createdById   Int?           @map("created_by")
+
+  createdAt DateTime @map("created_at") @default(now()) @db.DateTime(3)
+
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  createdBy User?   @relation(fields: [createdById], references: [id])
+
+  @@index([productId, createdAt], map: "idx_moves_product")
+  @@index([referenceType, referenceId], map: "idx_moves_reference")
+  @@map("stock_movements")
+}
+
+// ---------------------------------------------------------------------------
+// Cash ledger — replaces the frontend's free-form `transactions` array
+// ---------------------------------------------------------------------------
+
+model LedgerEntry {
+  id        Int        @id @default(autoincrement())
+  entryCode String    @unique @map("entry_code") @db.VarChar(24)
+  entryDate DateTime  @map("entry_date") @db.Date
+  direction LedgerDirection
+  type      LedgerEntryType
+
+  amount        Decimal        @db.Decimal(14, 2)
+  paymentMethod PaymentMethod? @map("payment_method")
+  reference     String?        @db.VarChar(80)
+  customerId    Int?           @map("customer_id")
+  invoiceId     Int?           @map("invoice_id")
+  supplierName  String?        @map("supplier_name") @db.VarChar(160)
+  status        LedgerStatus   @default(SUCCESS)
+  /// True when the money was received against an invoice raised earlier (as
+  /// opposed to the payment taken at the point of sale). Drives the frontend's
+  /// "Payment Received" vs "Income" label.
+  isSettlement  Boolean        @default(false) @map("is_settlement")
+  notes         String?        @db.VarChar(255)
+
+  createdAt DateTime @map("created_at") @default(now()) @db.DateTime(3)
+
+  customer Customer? @relation(fields: [customerId], references: [id])
+  invoice  Invoice?  @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([entryDate], map: "idx_ledger_date")
+  @@index([customerId], map: "idx_ledger_customer")
+  @@index([invoiceId], map: "idx_ledger_invoice")
+  @@index([type], map: "idx_ledger_type")
+  @@map("ledger_entries")
+}
+
+// ---------------------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------------------
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  actorUserId Int?     @map("actor_user_id")
+  action      String   @db.VarChar(40)
+  entityType  String   @map("entity_type") @db.VarChar(40)
+  entityId    String?  @map("entity_id") @db.VarChar(40)
+  beforeJson  String?  @map("before_json") @db.LongText
+  afterJson   String?  @map("after_json") @db.LongText
+  ip          String?  @db.VarChar(64)
+  createdAt   DateTime @map("created_at") @default(now()) @db.DateTime(3)
+
+  actor User? @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId], map: "idx_audit_entity")
+  @@index([actorUserId], map: "idx_audit_actor")
+  @@index([createdAt], map: "idx_audit_created")
+  @@map("audit_log")
+}

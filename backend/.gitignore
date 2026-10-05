@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.local
+*.log
+
+# Prisma
+prisma/*.db
+prisma/*.db-journal
+
+# Generated spec (npm run openapi ./openapi.json to produce)
+openapi.json
