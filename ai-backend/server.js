@@ -14,9 +14,6 @@ const PORT = process.env.PORT || 3000;
 const FLOWPILOT_API_URL =
     process.env.FLOWPILOT_API_URL || "http://localhost:4000";
 
-const FLOWPILOT_JWT_TOKEN =
-    process.env.FLOWPILOT_JWT_TOKEN;
-
 const GEMINI_API_KEY =
     process.env.GEMINI_API_KEY;
 
@@ -25,12 +22,15 @@ if (!GEMINI_API_KEY) {
     process.exit(1);
 }
 
-if (!FLOWPILOT_JWT_TOKEN) {
-    console.warn(
-        "WARNING: FLOWPILOT_JWT_TOKEN is missing. " +
-        "FlowPilot API actions will fail until it is configured."
-    );
-}
+/*
+ * Authentication is per-request, not per-process.
+ *
+ * The AI backend acts on behalf of the signed-in user: every incoming request
+ * must carry that user's `Authorization: Bearer <JWT>` header, and the same
+ * token is forwarded to the FlowPilot API. There is deliberately no shared or
+ * static service token here, so FlowPilot stays the source of truth for both
+ * authentication and authorization.
+ */
 
 const ai = new GoogleGenAI({
     apiKey: GEMINI_API_KEY
@@ -271,6 +271,77 @@ const CONFIRMATION_REQUIRED = new Set([
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+/**
+ * Extract the initiating user's bearer token from an incoming request.
+ *
+ * The token is held in memory only for the lifetime of the request and is
+ * forwarded to the FlowPilot API exactly as received. The AI backend never
+ * verifies the JWT itself — FlowPilot remains the single source of truth for
+ * authentication and authorization — and never logs it, sends it to Gemini, or
+ * echoes it back in a response.
+ */
+function readBearerToken(req) {
+    const header =
+        req.get("authorization");
+
+    if (
+        !header ||
+        !header.toLowerCase().startsWith("bearer ")
+    ) {
+        return null;
+    }
+
+    const token =
+        header.slice(7).trim();
+
+    return token || null;
+}
+
+
+/**
+ * Reject a request that carries no usable credentials.
+ *
+ * Mirrors the FlowPilot API's own 401 envelope so the frontend reacts to a
+ * missing session exactly as it does for any other authenticated call.
+ */
+function sendUnauthorized(
+    res,
+    message = "Missing bearer token"
+) {
+    return res.status(401).json({
+        success: false,
+        error: {
+            status: 401,
+            code: "UNAUTHORIZED",
+            message
+        }
+    });
+}
+
+
+/**
+ * Pass a permission denial through unchanged.
+ *
+ * A 403 is not an authentication failure and must never be rewritten as one;
+ * it simply relays FlowPilot's own decision for the signed-in user.
+ */
+function sendForbidden(
+    res,
+    message = "Forbidden",
+    details = null
+) {
+    return res.status(403).json({
+        success: false,
+        error: {
+            status: 403,
+            code: "FORBIDDEN",
+            message,
+            ...(details ? { details } : {})
+        }
+    });
 }
 
 
@@ -524,7 +595,8 @@ function buildRequestUrl(endpoint, parameters = {}) {
 
 async function executeAction(
     action,
-    actionResults
+    actionResults,
+    authToken
 ) {
     const resolvedEndpoint =
         resolveReferences(
@@ -574,15 +646,27 @@ async function executeAction(
         `Executing: ${method} ${url.toString()}`
     );
 
+    /*
+     * Every call to the FlowPilot API is made as the user who initiated the
+     * chat request. FlowPilot enforces that user's role and resource ownership,
+     * so the AI backend cannot perform an action the user could not perform
+     * directly. A missing token is a hard failure rather than a silent
+     * unauthenticated request.
+     */
+    if (!authToken) {
+        const error = new Error("Missing bearer token");
+
+        error.status = 401;
+        error.response = null;
+
+        throw error;
+    }
+
     const headers = {
         "Content-Type": "application/json",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "Authorization": `Bearer ${authToken}`
     };
-
-    if (FLOWPILOT_JWT_TOKEN) {
-        headers.Authorization =
-            `Bearer ${FLOWPILOT_JWT_TOKEN}`;
-    }
 
     const options = {
         method,
@@ -1303,6 +1387,18 @@ app.post(
     "/api/chat",
     async (req, res) => {
         try {
+            /*
+             * The chat endpoint acts on behalf of the signed-in user, so the
+             * request must carry that user's bearer token. It is forwarded to
+             * every FlowPilot API call this request makes.
+             */
+            const authToken =
+                readBearerToken(req);
+
+            if (!authToken) {
+                return sendUnauthorized(res);
+            }
+
             const userMessage =
                 req.body?.message;
 
@@ -1487,7 +1583,8 @@ app.post(
                     const result =
                         await executeAction(
                             action,
-                            actionResults
+                            actionResults,
+                            authToken
                         );
 
                     actionResults.push({
@@ -1516,6 +1613,29 @@ app.post(
                                 error.response || null
                         }
                     });
+
+                    /*
+                     * Authentication and authorization failures are not
+                     * ordinary action errors. Relay the original status so the
+                     * caller can recover (401 -> sign in again, 403 -> the
+                     * permission error it really is) rather than reporting a
+                     * 200 with a nested failure.
+                     */
+
+                    if (error.status === 401) {
+                        return sendUnauthorized(
+                            res,
+                            error.message
+                        );
+                    }
+
+                    if (error.status === 403) {
+                        return sendForbidden(
+                            res,
+                            error.message,
+                            error.response?.error?.details ?? null
+                        );
+                    }
 
                     /*
                      * Stop execution if an action fails.
@@ -1615,6 +1735,17 @@ app.post(
     "/api/execute",
     async (req, res) => {
         try {
+            /*
+             * Confirming a plan must not be a path around authentication: the
+             * same per-user token drives execution here as in /api/chat.
+             */
+            const authToken =
+                readBearerToken(req);
+
+            if (!authToken) {
+                return sendUnauthorized(res);
+            }
+
             const plan =
                 req.body?.plan;
 
@@ -1686,7 +1817,8 @@ app.post(
                     const result =
                         await executeAction(
                             action,
-                            results
+                            results,
+                            authToken
                         );
 
                     results.push({
@@ -1712,6 +1844,26 @@ app.post(
                                 null
                         }
                     });
+
+                    /*
+                     * Relay authentication/authorization failures with their
+                     * original status, exactly as in /api/chat.
+                     */
+
+                    if (error.status === 401) {
+                        return sendUnauthorized(
+                            res,
+                            error.message
+                        );
+                    }
+
+                    if (error.status === 403) {
+                        return sendForbidden(
+                            res,
+                            error.message,
+                            error.response?.error?.details ?? null
+                        );
+                    }
 
                     break;
                 }
@@ -1796,7 +1948,7 @@ app.listen(
         );
 
         console.log(
-            `FlowPilot JWT configured: ${Boolean(FLOWPILOT_JWT_TOKEN)}`
+            "Auth: per-request bearer token forwarded to the FlowPilot API"
         );
 
         console.log(

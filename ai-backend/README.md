@@ -175,10 +175,12 @@ GEMINI_API_KEY=AIzaSyxxxxxxxxxxxxxxxx
 
 FLOWPILOT_API_URL=http://localhost:4000
 
-FLOWPILOT_JWT_TOKEN=your_flowpilot_jwt_token
-
 PORT=3000
 ```
+
+There is deliberately **no** token in the environment. The AI backend acts on
+behalf of the signed-in user and forwards that user's bearer token per request
+(see [Authentication](#authentication)).
 
 ## Environment variables
 
@@ -200,14 +202,6 @@ FLOWPILOT_API_URL=http://localhost:4000
 
 If your FlowPilot backend runs somewhere else, change this value.
 
-### FLOWPILOT_JWT_TOKEN
-
-JWT token used by the AI backend when communicating with the authenticated FlowPilot API.
-
-```env
-FLOWPILOT_JWT_TOKEN=your_jwt_token
-```
-
 ### PORT
 
 Port used by the AI chatbot backend.
@@ -215,6 +209,38 @@ Port used by the AI chatbot backend.
 ```env
 PORT=3000
 ```
+
+---
+
+# Authentication
+
+Every request that can execute a FlowPilot API action must carry the
+**initiating user's** JWT:
+
+```http
+Authorization: Bearer <current-user-jwt>
+```
+
+The AI backend:
+
+- requires the header on `/api/chat` and `/api/execute`;
+- forwards that same token, unchanged, to every FlowPilot API call it makes;
+- never verifies the JWT itself — FlowPilot remains the single source of truth
+  for authentication and authorization, so the user's roles and
+  resource-ownership checks are enforced exactly as if they had called the API
+  directly;
+- never logs the token, never sends it to Gemini, and never returns it in a
+  response.
+
+There is no static `FLOWPILOT_JWT_TOKEN` and no service-account fallback. When
+the token is missing, the AI backend answers `401 Missing bearer token`; when it
+is invalid or expired, FlowPilot's own `401` is surfaced unchanged so the
+frontend's normal re-login flow recovers. A permission denial (`403`) is passed
+through unchanged too — it is never rewritten as an authentication error.
+
+Under the Next.js BFF, the browser never handles the raw token: `proxy.js` lifts
+the httpOnly session cookie into the `Authorization` header and the `/api/ai/*`
+rewrite forwards it to this service.
 
 ---
 
@@ -235,7 +261,7 @@ You should see something similar to:
 FlowPilot AI Backend running on http://localhost:3000
 FlowPilot API: http://localhost:4000
 Gemini configured: true
-FlowPilot JWT configured: true
+Auth: per-request bearer token forwarded to the FlowPilot API
 ========================================
 ```
 
@@ -284,10 +310,14 @@ Using `curl`:
 ```bash
 curl -X POST http://localhost:3000/api/chat \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $FLOWPILOT_USER_JWT" \
   -d '{"message":"Show me all active customers from Mumbai"}'
 ```
 
-The AI will understand the request, create the appropriate FlowPilot API action, execute it, and return the result.
+The `Authorization` header carries the **signed-in user's** JWT. Without it the
+endpoint answers `401 Missing bearer token`. The AI will understand the request,
+create the appropriate FlowPilot API action, execute it **as that user**, and
+return the result.
 
 ---
 
@@ -500,6 +530,10 @@ Request:
 
 The executor validates the endpoint again before making the request.
 
+Like `/api/chat`, this endpoint requires `Authorization: Bearer <current-user-jwt>`
+and executes the plan as that user; confirming a plan is not a way around
+authentication.
+
 ---
 
 # Action Execution
@@ -697,6 +731,7 @@ AI-Chat-Bot/
 ├── package.json
 ├── package-lock.json
 ├── .env
+├── .env.example
 ├── .gitignore
 └── README.md
 ```
