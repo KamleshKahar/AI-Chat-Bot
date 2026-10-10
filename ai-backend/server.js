@@ -309,7 +309,9 @@ function readBearerToken(req) {
  */
 function sendUnauthorized(
     res,
-    message = "Missing bearer token"
+    message =
+        "Missing bearer token. Send the signed-in user's JWT as " +
+        "'Authorization: Bearer <token>'."
 ) {
     return res.status(401).json({
         success: false,

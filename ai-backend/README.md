@@ -242,6 +242,30 @@ Under the Next.js BFF, the browser never handles the raw token: `proxy.js` lifts
 the httpOnly session cookie into the `Authorization` header and the `/api/ai/*`
 rewrite forwards it to this service.
 
+## Getting a token for manual testing
+
+Calling `/api/chat` directly (for example with `curl` or Postman) requires a
+real JWT. Sign in to the FlowPilot backend first and reuse the returned
+`data.token`:
+
+```bash
+# 1. Log in to FlowPilot and capture the token
+TOKEN=$(curl -s -X POST http://localhost:4000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@flowpilot.in","password":"flowpilot123"}' \
+  | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).data.token))")
+
+# 2. Call the AI backend as that user
+curl -X POST http://localhost:3000/api/chat \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"message":"hello"}'
+```
+
+Remember that demo tokens expire after `JWT_EXPIRES_IN` (default `8h`); re-run
+the login step to obtain a fresh one. If the token is missing or blank, the
+endpoint answers `401 Missing bearer token`.
+
 ---
 
 # Start the Project

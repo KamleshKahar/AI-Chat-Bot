@@ -25,3 +25,13 @@ node server.js
     a. POST http://localhost:3000/api/chat
        Header: Authorization: Bearer <current-user-jwt>
     b. {"message": "Show me all active customers from Mumbai"}
+
+   The token in (a) is the signed-in user's JWT, not a static key. Get one by
+   logging in to FlowPilot first:
+
+   POST http://localhost:4000/api/auth/login
+   {"email": "admin@flowpilot.in", "password": "flowpilot123"}
+   -> use the returned `data.token`
+
+   Without a valid `Authorization` header the endpoint answers
+   `401 Missing bearer token`.
