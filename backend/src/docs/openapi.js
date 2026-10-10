@@ -1,1808 +1,573 @@
-```js
-require("dotenv").config();
+import { OpenApiGeneratorV31 } from '@asteasolutions/zod-to-openapi';
+import {
+  registry,
+  z,
+  listEnvelope,
+  jsonResponse,
+  registerRoute,
+  DateRangeQuery,
+  PagingQuery,
+} from '../schemas/common.js';
+import {
+  UserSchema,
+  LoginResponseSchema,
+  CompanySchema,
+  CategorySchema,
+  ProductSchema,
+  CustomerSchema,
+  SaleSchema,
+  InvoiceSchema,
+  TransactionSchema,
+  DashboardSummarySchema,
+  RevenuePointSchema,
+} from './responseSchemas.js';
+import * as V from '../schemas/validators.js';
 
-const express = require("express");
-const cors = require("cors");
-const { GoogleGenAI } = require("@google/genai");
+/**
+ * Builds the OpenAPI 3.1 document from the Zod schemas.
+ *
+ * The same schema objects validate incoming requests at runtime, so the
+ * documentation and the enforcement cannot drift apart.
+ */
 
-const app = express();
+const BEARER = [{ bearerAuth: [] }];
 
-app.use(cors());
-app.use(express.json());
-
-const PORT = process.env.PORT || 3000;
-
-const FLOWPILOT_API_URL =
-    process.env.FLOWPILOT_API_URL || "http://localhost:4000";
-
-const FLOWPILOT_JWT_TOKEN =
-    process.env.FLOWPILOT_JWT_TOKEN;
-
-const GEMINI_API_KEY =
-    process.env.GEMINI_API_KEY;
-
-if (!GEMINI_API_KEY) {
-    console.error("ERROR: GEMINI_API_KEY is missing");
-    process.exit(1);
+export function buildOpenApiDocument() {
+  // Path registration is not idempotent (registerPath rejects a duplicate
+  // method+path), and the spec is static, so build it once and reuse it.
+  if (cachedDocument) return cachedDocument;
+  cachedDocument = generateDocument();
+  return cachedDocument;
 }
 
-if (!FLOWPILOT_JWT_TOKEN) {
-    console.warn(
-        "WARNING: FLOWPILOT_JWT_TOKEN is missing. " +
-        "FlowPilot API actions will fail until it is configured."
-    );
+let cachedDocument = null;
+
+function generateDocument() {
+  const listProducts = listEnvelope(ProductSchema);
+  const listCustomers = listEnvelope(CustomerSchema);
+  const listSales = listEnvelope(SaleSchema);
+  const listInvoices = listEnvelope(InvoiceSchema);
+  const listTransactions = listEnvelope(TransactionSchema);
+
+  // ---- health -------------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/health',
+    tags: ['System'],
+    summary: 'Liveness and database connectivity probe',
+    security: null,
+    responses: {
+      200: jsonResponse('Service healthy', z.object({
+        status: z.string(),
+        database: z.string(),
+        timestamp: z.string(),
+      })),
+    },
+  });
+
+  // ---- auth ---------------------------------------------------------------
+  registerRoute({
+    method: 'post',
+    path: '/api/auth/login',
+    tags: ['Auth'],
+    summary: 'Exchange credentials for a bearer token',
+    security: null,
+    request: { body: { content: { 'application/json': { schema: V.loginSchema } } } },
+    responses: { 200: jsonResponse('Signed in', LoginResponseSchema) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/auth/me',
+    tags: ['Auth'],
+    summary: 'Current authenticated user',
+    security: BEARER,
+    responses: { 200: jsonResponse('Current user', z.object({ data: UserSchema })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/auth/logout',
+    tags: ['Auth'],
+    summary: 'Record a logout (stateless JWT — the client discards the token)',
+    security: BEARER,
+    responses: { 200: jsonResponse('Logged out', z.object({ data: z.object({ success: z.boolean() }) })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/auth/change-password',
+    tags: ['Auth'],
+    summary: 'Change the signed-in user\'s password',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.changePasswordSchema } } } },
+    responses: { 200: jsonResponse('Password changed', z.object({ data: z.object({ success: z.boolean() }) })) },
+  });
+
+  // ---- company ------------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/company',
+    tags: ['Company'],
+    summary: 'Company profile used as the invoice letterhead',
+    security: BEARER,
+    responses: { 200: jsonResponse('Company profile', z.object({ data: CompanySchema })) },
+  });
+
+  registerRoute({
+    method: 'put',
+    path: '/api/company',
+    tags: ['Company'],
+    summary: 'Update the company profile (ADMIN only)',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.updateCompanySchema } } } },
+    responses: { 200: jsonResponse('Updated profile', z.object({ data: CompanySchema })) },
+  });
+
+  // ---- categories ---------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/categories',
+    tags: ['Categories'],
+    summary: 'List categories',
+    description:
+      'Returns the complete active set — categories are not paginated, because the product filter dropdowns need all of them. The `meta` block is still present so every list endpoint shares one response shape; `page` is always 1 and `totalPages` always 1.',
+    security: BEARER,
+    responses: { 200: jsonResponse('Categories', listEnvelope(CategorySchema)) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/categories',
+    tags: ['Categories'],
+    summary: 'Create a category',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.createCategorySchema } } } },
+    responses: { 201: jsonResponse('Created', z.object({ data: CategorySchema })) },
+  });
+
+  registerRoute({
+    method: 'patch',
+    path: '/api/categories/{id}',
+    tags: ['Categories'],
+    summary: 'Update a category',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string().openapi({ example: 'CAT-01' }) }),
+      body: { content: { 'application/json': { schema: V.updateCategorySchema } } },
+    },
+    responses: { 200: jsonResponse('Updated', z.object({ data: CategorySchema })) },
+  });
+
+  registerRoute({
+    method: 'delete',
+    path: '/api/categories/{id}',
+    tags: ['Categories'],
+    summary: 'Soft-delete a category (409 while products still reference it)',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'CAT-01' }) }) },
+    responses: {
+      200: jsonResponse(
+        'Deleted',
+        z.object({ data: z.object({ id: z.string(), deleted: z.boolean() }) })
+      ),
+    },
+  });
+
+  // ---- products -----------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/products',
+    tags: ['Products'],
+    summary: 'Paginated product list with server-side search, filtering and sorting',
+    description:
+      '`status` filtering and sorting are evaluated in SQL using the derived stock-status expression, so paging stays correct.',
+    security: BEARER,
+    request: { query: z.object({ ...V.productListQuerySchema.shape, ...PagingQuery.shape }) },
+    responses: {
+      200: jsonResponse('Products', listProducts.extend({
+        counts: z.object({
+          all: z.number().int(),
+          in_stock: z.number().int(),
+          low_stock: z.number().int(),
+          out_of_stock: z.number().int(),
+        }),
+      })),
+    },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/products/{id}',
+    tags: ['Products'],
+    summary: 'Product detail with sales performance and recent stock movements',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string().openapi({ example: 'PRD-101' }) }),
+      query: DateRangeQuery,
+    },
+    responses: { 200: jsonResponse('Product detail', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/products',
+    tags: ['Products'],
+    summary: 'Create a product (accepts category code or name)',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.createProductSchema } } } },
+    responses: { 201: jsonResponse('Created', z.object({ data: ProductSchema })) },
+  });
+
+  registerRoute({
+    method: 'put',
+    path: '/api/products/{id}',
+    tags: ['Products'],
+    summary: 'Update product details (stock is not writable here — use a stock adjustment)',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string().openapi({ example: 'PRD-101' }) }),
+      body: { content: { 'application/json': { schema: V.updateProductSchema } } },
+    },
+    responses: { 200: jsonResponse('Updated', z.object({ data: ProductSchema })) },
+  });
+
+  registerRoute({
+    method: 'delete',
+    path: '/api/products/{id}',
+    tags: ['Products'],
+    summary: 'Soft-delete a product (ADMIN only)',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'PRD-101' }) }) },
+    responses: {
+      200: jsonResponse(
+        'Deleted',
+        z.object({ data: z.object({ id: z.string(), deleted: z.boolean() }) })
+      ),
+    },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/products/{id}/stock-adjustments',
+    tags: ['Products'],
+    summary: 'Adjust stock atomically, writing a movement and a ledger entry',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string().openapi({ example: 'PRD-101' }) }),
+      body: { content: { 'application/json': { schema: V.stockAdjustmentSchema } } },
+    },
+    responses: { 201: jsonResponse('Adjusted', z.object({ data: z.any() })) },
+  });
+
+  // ---- customers ----------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/customers',
+    tags: ['Customers'],
+    summary: 'Paginated customer list',
+    description:
+      '`totalPurchases`, `outstandingBalance` and `ordersCount` are computed by a SQL aggregate over live invoices — they are not cached columns.',
+    security: BEARER,
+    request: { query: z.object({ ...V.customerListQuerySchema.shape, ...PagingQuery.shape }) },
+    responses: { 200: jsonResponse('Customers', listCustomers) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/customers/{id}',
+    tags: ['Customers'],
+    summary: 'Customer detail with purchase history',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'CUST-001' }) }) },
+    responses: { 200: jsonResponse('Customer detail', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/customers',
+    tags: ['Customers'],
+    summary: 'Create a customer',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.createCustomerSchema } } } },
+    responses: { 201: jsonResponse('Created', z.object({ data: CustomerSchema })) },
+  });
+
+  registerRoute({
+    method: 'put',
+    path: '/api/customers/{id}',
+    tags: ['Customers'],
+    summary: 'Update a customer',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string().openapi({ example: 'CUST-001' }) }),
+      body: { content: { 'application/json': { schema: V.updateCustomerSchema } } },
+    },
+    responses: { 200: jsonResponse('Updated', z.object({ data: CustomerSchema })) },
+  });
+
+  registerRoute({
+    method: 'delete',
+    path: '/api/customers/{id}',
+    tags: ['Customers'],
+    summary: 'Soft-delete a customer',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'CUST-001' }) }) },
+    responses: {
+      200: jsonResponse(
+        'Deleted',
+        z.object({ data: z.object({ id: z.string(), deleted: z.boolean() }) })
+      ),
+    },
+  });
+
+  // ---- sales --------------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/sales',
+    tags: ['Sales'],
+    summary: 'Paginated POS-oriented sale list',
+    description:
+      'Backed by the same `invoices` table as `/api/invoices`, projected into the shape the Sales screen renders.',
+    security: BEARER,
+    request: { query: z.object({ ...V.saleListQuerySchema.shape, ...PagingQuery.shape }) },
+    responses: { 200: jsonResponse('Sales', listSales) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/sales/{id}',
+    tags: ['Sales'],
+    summary: 'One sale by sale code, invoice number or id',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'SALE-1001' }) }) },
+    responses: { 200: jsonResponse('Sale', z.object({ data: SaleSchema })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/sales',
+    tags: ['Sales'],
+    summary: 'Create a sale (single transaction: stock, invoice, payment, ledger)',
+    description:
+      'Client-supplied `subtotal`, `taxAmount`, `discountAmount` and `grandTotal` are ignored — the server recomputes every figure from the catalogue. Returns 409 if any line exceeds available stock.',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.createSaleSchema } } } },
+    responses: {
+      201: jsonResponse('Sale created', z.object({ data: z.object({ sale: SaleSchema, invoice: InvoiceSchema }) })),
+    },
+  });
+
+  // ---- invoices -----------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/invoices',
+    tags: ['Invoices'],
+    summary: 'Paginated invoice list',
+    security: BEARER,
+    request: { query: z.object({ ...V.invoiceListQuerySchema.shape, ...PagingQuery.shape }) },
+    responses: { 200: jsonResponse('Invoices', listInvoices) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/invoices/{id}',
+    tags: ['Invoices'],
+    summary: 'Invoice detail with payments (prints straight from this payload)',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'INV-2026-001' }) }) },
+    responses: { 200: jsonResponse('Invoice', z.object({ data: InvoiceSchema })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/invoices/{id}/payments',
+    tags: ['Invoices'],
+    summary: 'Record a payment against an invoice',
+    description: 'Rejects with 422 if the amount exceeds the outstanding balance.',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string().openapi({ example: 'INV-2026-001' }) }),
+      body: { content: { 'application/json': { schema: V.recordPaymentSchema } } },
+    },
+    responses: { 201: jsonResponse('Payment recorded', z.object({ data: InvoiceSchema })) },
+  });
+
+  registerRoute({
+    method: 'delete',
+    path: '/api/invoices/{id}',
+    tags: ['Invoices'],
+    summary: 'Cancel an invoice (soft delete)',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'INV-2026-001' }) }) },
+    responses: { 200: jsonResponse('Cancelled', z.object({ id: z.string(), deleted: z.boolean() })) },
+  });
+
+  // ---- dashboard ----------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/dashboard/summary',
+    tags: ['Dashboard'],
+    summary: 'Headline metrics for the dashboard StatCards',
+    security: BEARER,
+    responses: { 200: jsonResponse('Metrics', DashboardSummarySchema) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/dashboard/alerts',
+    tags: ['Dashboard'],
+    summary: 'Low and out of stock products for the header bell',
+    security: BEARER,
+    request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }) },
+    responses: { 200: jsonResponse('Alerts', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/dashboard/transactions',
+    tags: ['Dashboard'],
+    summary: 'Most recent ledger entries',
+    security: BEARER,
+    request: { query: z.object({ limit: z.coerce.number().int().min(1).max(100).optional() }) },
+    responses: { 200: jsonResponse('Transactions', z.object({ data: z.array(TransactionSchema) })) },
+  });
+
+  // ---- ledger -------------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/ledger',
+    tags: ['Ledger'],
+    summary: 'Paginated cash ledger (structured replacement for `transactions`)',
+    security: BEARER,
+    request: { query: z.object({ ...V.ledgerListQuerySchema.shape, ...PagingQuery.shape }) },
+    responses: { 200: jsonResponse('Ledger entries', listTransactions) },
+  });
+
+  // ---- reports ------------------------------------------------------------
+  const reportRange = z.object({ ...DateRangeQuery.shape, granularity: z.enum(['day', 'week', 'month']).optional() });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/sales-summary',
+    tags: ['Reports'],
+    summary: 'Sales totals for a window, with the previous window for comparison',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('Summary', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/revenue-trend',
+    tags: ['Reports'],
+    summary: 'Revenue over time, zero-filled so quiet days are not omitted',
+    security: BEARER,
+    request: { query: reportRange },
+    responses: { 200: jsonResponse('Series', z.object({ data: z.array(RevenuePointSchema) })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/payment-breakdown',
+    tags: ['Reports'],
+    summary: 'Collected amount split by payment method',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('Breakdown', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/product-performance',
+    tags: ['Reports'],
+    summary: 'Units sold, revenue, profit and margin per product',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('Performance', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/inventory-valuation',
+    tags: ['Reports'],
+    summary: 'Stock value at cost and retail, overall and per category',
+    security: BEARER,
+    responses: { 200: jsonResponse('Valuation', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/customer-performance',
+    tags: ['Reports'],
+    summary: 'Lifetime value, collection and average order per customer',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('Performance', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/cash-flow',
+    tags: ['Reports'],
+    summary: 'Cash in, cash out and net for a window',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('Cash flow', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/receivables-aging',
+    tags: ['Reports'],
+    summary: 'Outstanding amounts bucketed by how late they are',
+    security: BEARER,
+    responses: { 200: jsonResponse('Aging', z.object({ data: z.any() })) },
+  });
+
+  const generator = new OpenApiGeneratorV31(registry.definitions);
+
+  return generator.generateDocument({
+    openapi: '3.1.0',
+    info: {
+      title: 'FlowPilot Sales & Inventory API',
+      version: '1.0.0',
+      description: [
+        'REST API backing the FlowPilot Next.js dashboard.',
+        '',
+        '### Conventions',
+        '- **Identifiers** are human-readable document codes (`PRD-101`, `CUST-001`, `INV-2026-009`), returned in the `id` field.',
+        '- **Money** is a JSON number in rupees, always `DECIMAL(14,2)` server-side and rounded half-up.',
+        '- **Lists** return `{ data: [...], meta: { total, page, limit, totalPages } }`. No endpoint returns an unbounded collection.',
+        '- **Errors** return `{ error: { status, code, message, details? } }`.',
+        '',
+        '### Derived state',
+        '- Product `status` is derived from `stockQuantity` vs `minStockLevel` and is never stored.',
+        '- Invoice `paymentStatus` of `Overdue` is derived from `dueDate` vs today and is never stored.',
+        '',
+        '### GST',
+        'Intra-state invoices are split into CGST + SGST; inter-state invoices carry IGST at the full rate.',
+      ].join('\n'),
+    },
+    servers: [{ url: 'http://localhost:4000', description: 'Local development' }],
+    security: BEARER,
+    tags: [
+      { name: 'System', description: 'Health and diagnostics' },
+      { name: 'Auth', description: 'Sign in and password management' },
+      { name: 'Company', description: 'Invoice letterhead and banking details' },
+      { name: 'Categories', description: 'Product categories' },
+      { name: 'Products', description: 'Catalogue and stock' },
+      { name: 'Customers', description: 'Customer records' },
+      { name: 'Sales', description: 'Point-of-sale transactions' },
+      { name: 'Invoices', description: 'Invoice documents and payments' },
+      { name: 'Dashboard', description: 'Dashboard aggregates' },
+      { name: 'Ledger', description: 'Cash movement history' },
+      { name: 'Reports', description: 'Aggregated reporting' },
+    ],
+    components: {
+      securitySchemes: {
+        bearerAuth: { type: 'http', scheme: 'bearer', bearerFormat: 'JWT' },
+      },
+    },
+  });
 }
-
-const ai = new GoogleGenAI({
-    apiKey: GEMINI_API_KEY
-});
-
-
-/*
-|--------------------------------------------------------------------------
-| FLOWPILOT API ALLOWLIST
-|--------------------------------------------------------------------------
-|
-| Gemini is NEVER allowed to choose an arbitrary URL.
-|
-| Only these endpoints can be executed.
-|
-*/
-
-const ALLOWED_ROUTES = [
-    // System
-    {
-        method: "GET",
-        pattern: /^\/api\/health$/
-    },
-
-    // Auth
-    {
-        method: "GET",
-        pattern: /^\/api\/auth\/me$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/auth\/logout$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/auth\/change-password$/
-    },
-
-    // Company
-    {
-        method: "GET",
-        pattern: /^\/api\/company$/
-    },
-    {
-        method: "PUT",
-        pattern: /^\/api\/company$/
-    },
-
-    // Categories
-    {
-        method: "GET",
-        pattern: /^\/api\/categories$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/categories$/
-    },
-    {
-        method: "PATCH",
-        pattern: /^\/api\/categories\/[^/]+$/
-    },
-    {
-        method: "DELETE",
-        pattern: /^\/api\/categories\/[^/]+$/
-    },
-
-    // Products
-    {
-        method: "GET",
-        pattern: /^\/api\/products$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/products\/[^/]+$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/products$/
-    },
-    {
-        method: "PUT",
-        pattern: /^\/api\/products\/[^/]+$/
-    },
-    {
-        method: "DELETE",
-        pattern: /^\/api\/products\/[^/]+$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/products\/[^/]+\/stock-adjustments$/
-    },
-
-    // Customers
-    {
-        method: "GET",
-        pattern: /^\/api\/customers$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/customers\/[^/]+$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/customers$/
-    },
-    {
-        method: "PUT",
-        pattern: /^\/api\/customers\/[^/]+$/
-    },
-    {
-        method: "DELETE",
-        pattern: /^\/api\/customers\/[^/]+$/
-    },
-
-    // Sales
-    {
-        method: "GET",
-        pattern: /^\/api\/sales$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/sales\/[^/]+$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/sales$/
-    },
-
-    // Invoices
-    {
-        method: "GET",
-        pattern: /^\/api\/invoices$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/invoices\/[^/]+$/
-    },
-    {
-        method: "POST",
-        pattern: /^\/api\/invoices\/[^/]+\/payments$/
-    },
-    {
-        method: "DELETE",
-        pattern: /^\/api\/invoices\/[^/]+$/
-    },
-
-    // Dashboard
-    {
-        method: "GET",
-        pattern: /^\/api\/dashboard\/summary$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/dashboard\/alerts$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/dashboard\/transactions$/
-    },
-
-    // Ledger
-    {
-        method: "GET",
-        pattern: /^\/api\/ledger$/
-    },
-
-    // Reports
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/sales-summary$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/revenue-trend$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/payment-breakdown$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/product-performance$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/inventory-valuation$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/customer-performance$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/cash-flow$/
-    },
-    {
-        method: "GET",
-        pattern: /^\/api\/reports\/receivables-aging$/
-    }
-];
-
-
-/*
-|--------------------------------------------------------------------------
-| ACTIONS THAT REQUIRE CONFIRMATION
-|--------------------------------------------------------------------------
-*/
-
-const CONFIRMATION_REQUIRED = new Set([
-    "POST:/api/sales",
-    "POST:/api/products",
-    "POST:/api/products/*/stock-adjustments",
-    "PUT:/api/products/*",
-    "DELETE:/api/products/*",
-
-    "POST:/api/customers",
-    "PUT:/api/customers/*",
-    "DELETE:/api/customers/*",
-
-    "POST:/api/invoices/*/payments",
-    "DELETE:/api/invoices/*",
-
-    "PUT:/api/company",
-
-    "POST:/api/categories",
-    "PATCH:/api/categories/*",
-    "DELETE:/api/categories/*",
-
-    "POST:/api/auth/change-password"
-]);
-
-
-/*
-|--------------------------------------------------------------------------
-| HELPERS
-|--------------------------------------------------------------------------
-*/
-
-function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-
-function isAllowedRoute(method, path) {
-    return ALLOWED_ROUTES.some(route => {
-        return (
-            route.method === method.toUpperCase() &&
-            route.pattern.test(path)
-        );
-    });
-}
-
-
-function requiresConfirmation(method, path) {
-    const normalized = `${method.toUpperCase()}:${path}`;
-
-    if (CONFIRMATION_REQUIRED.has(normalized)) {
-        return true;
-    }
-
-    const wildcard = normalized
-        .replace(
-            /\/(products|customers|invoices|categories)\/[^/]+/g,
-            "/$1/*"
-        );
-
-    if (CONFIRMATION_REQUIRED.has(wildcard)) {
-        return true;
-    }
-
-    return false;
-}
-
-
-function safeJsonParse(text) {
-    if (!text) {
-        throw new Error("Gemini returned an empty response.");
-    }
-
-    let cleaned = text.trim();
-
-    // Remove accidental markdown fences.
-    cleaned = cleaned
-        .replace(/^```json\s*/i, "")
-        .replace(/^```\s*/i, "")
-        .replace(/\s*```$/i, "")
-        .trim();
-
-    try {
-        return JSON.parse(cleaned);
-    } catch (error) {
-        console.error("Invalid Gemini JSON:");
-        console.error(cleaned);
-
-        throw new Error(
-            "Gemini returned invalid JSON."
-        );
-    }
-}
-
-
-function normalizeAction(action) {
-    if (!action || typeof action !== "object") {
-        return null;
-    }
-
-    const method = String(action.method || "GET").toUpperCase();
-
-    let endpoint = action.endpoint || "";
-
-    if (!endpoint.startsWith("/")) {
-        endpoint = `/${endpoint}`;
-    }
-
-    return {
-        action: action.action || "unknown",
-        method,
-        endpoint,
-        parameters:
-            action.parameters &&
-            typeof action.parameters === "object"
-                ? action.parameters
-                : {},
-        body:
-            action.body &&
-            typeof action.body === "object"
-                ? action.body
-                : {},
-        requiresConfirmation:
-            Boolean(action.requiresConfirmation),
-        reason:
-            action.reason ||
-            ""
-    };
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| ACTION REFERENCE RESOLUTION
-|--------------------------------------------------------------------------
-|
-| Allows one action to use the result of a previous action.
-|
-| Example:
-|
-| $action[0].result.data.id
-|
-*/
-
-function getNestedValue(object, path) {
-    const parts = path.split(".");
-
-    let current = object;
-
-    for (const part of parts) {
-        if (
-            current === null ||
-            current === undefined
-        ) {
-            return undefined;
-        }
-
-        current = current[part];
-    }
-
-    return current;
-}
-
-
-function resolveReferences(value, actionResults) {
-    if (typeof value === "string") {
-        const exactMatch =
-            value.match(/^\$action\[(\d+)\]\.result(?:\.(.+))?$/);
-
-        if (exactMatch) {
-            const index = Number(exactMatch[1]);
-            const path = exactMatch[2];
-
-            const result = actionResults[index];
-
-            if (!result) {
-                return value;
-            }
-
-            if (!path) {
-                return result;
-            }
-
-            return getNestedValue(result, path);
-        }
-
-        // Also resolve embedded references.
-        return value.replace(
-            /\$action\[(\d+)\]\.result(?:\.([A-Za-z0-9_.]+))?/g,
-            (match, index, path) => {
-                const result = actionResults[Number(index)];
-
-                if (!result) {
-                    return match;
-                }
-
-                if (!path) {
-                    return String(result);
-                }
-
-                const resolved = getNestedValue(result, path);
-
-                return resolved === undefined
-                    ? match
-                    : String(resolved);
-            }
-        );
-    }
-
-    if (Array.isArray(value)) {
-        return value.map(item =>
-            resolveReferences(item, actionResults)
-        );
-    }
-
-    if (
-        value &&
-        typeof value === "object"
-    ) {
-        const output = {};
-
-        for (const [key, child] of Object.entries(value)) {
-            output[key] =
-                resolveReferences(child, actionResults);
-        }
-
-        return output;
-    }
-
-    return value;
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| BUILD FLOWPILOT REQUEST
-|--------------------------------------------------------------------------
-*/
-
-function buildRequestUrl(endpoint, parameters = {}) {
-    const url =
-        new URL(
-            endpoint,
-            FLOWPILOT_API_URL
-        );
-
-    if (
-        parameters &&
-        typeof parameters === "object"
-    ) {
-        for (const [key, value] of Object.entries(parameters)) {
-            if (
-                value === undefined ||
-                value === null ||
-                value === ""
-            ) {
-                continue;
-            }
-
-            if (Array.isArray(value)) {
-                value.forEach(item => {
-                    url.searchParams.append(
-                        key,
-                        String(item)
-                    );
-                });
-            } else {
-                url.searchParams.set(
-                    key,
-                    String(value)
-                );
-            }
-        }
-    }
-
-    return url;
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| EXECUTE ONE ACTION
-|--------------------------------------------------------------------------
-*/
-
-async function executeAction(
-    action,
-    actionResults
-) {
-    const resolvedEndpoint =
-        resolveReferences(
-            action.endpoint,
-            actionResults
-        );
-
-    const resolvedParameters =
-        resolveReferences(
-            action.parameters || {},
-            actionResults
-        );
-
-    const resolvedBody =
-        resolveReferences(
-            action.body || {},
-            actionResults
-        );
-
-    const method =
-        String(action.method || "GET")
-            .toUpperCase();
-
-    /*
-     * Security: never allow Gemini to execute
-     * arbitrary endpoints.
-     */
-
-    if (
-        !isAllowedRoute(
-            method,
-            resolvedEndpoint
-        )
-    ) {
-        throw new Error(
-            `Blocked API action: ${method} ${resolvedEndpoint}`
-        );
-    }
-
-    const url =
-        buildRequestUrl(
-            resolvedEndpoint,
-            resolvedParameters
-        );
-
-    console.log(
-        `Executing: ${method} ${url.toString()}`
-    );
-
-    const headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    };
-
-    if (FLOWPILOT_JWT_TOKEN) {
-        headers.Authorization =
-            `Bearer ${FLOWPILOT_JWT_TOKEN}`;
-    }
-
-    const options = {
-        method,
-        headers
-    };
-
-    if (
-        method !== "GET" &&
-        method !== "HEAD"
-    ) {
-        options.body =
-            JSON.stringify(
-                resolvedBody
-            );
-    }
-
-    const response =
-        await fetch(
-            url,
-            options
-        );
-
-    const rawText =
-        await response.text();
-
-    let data;
-
-    try {
-        data =
-            rawText
-                ? JSON.parse(rawText)
-                : {};
-    } catch {
-        data = {
-            raw: rawText
-        };
-    }
-
-    if (!response.ok) {
-        const errorMessage =
-            data?.error?.message ||
-            data?.message ||
-            `FlowPilot API returned HTTP ${response.status}`;
-
-        const error = new Error(
-            errorMessage
-        );
-
-        error.status =
-            response.status;
-
-        error.response =
-            data;
-
-        throw error;
-    }
-
-    return {
-        status: response.status,
-        data
-    };
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| GEMINI SYSTEM INSTRUCTION
-|--------------------------------------------------------------------------
-*/
-
-const SYSTEM_INSTRUCTION = `
-You are FlowPilot AI, an intelligent business assistant for the
-FlowPilot Sales & Inventory Management System.
-
-Your job is to understand natural-language business requests and
-convert them into executable structured actions.
-
-You DO NOT directly execute HTTP requests.
-
-The Node.js backend will execute the actions you return.
-
-IMPORTANT:
-Return valid JSON only.
-Never return Markdown.
-Never use code fences.
-Never return explanations outside JSON.
-
-==================================================
-SUPPORTED FLOWPILOT API
-==================================================
-
-Base URL:
-
-http://localhost:4000
-
-Available endpoints:
-
-GET    /api/health
-
-GET    /api/auth/me
-POST   /api/auth/logout
-POST   /api/auth/change-password
-
-GET    /api/company
-PUT    /api/company
-
-GET    /api/categories
-POST   /api/categories
-PATCH  /api/categories/{id}
-DELETE /api/categories/{id}
-
-GET    /api/products
-GET    /api/products/{id}
-POST   /api/products
-PUT    /api/products/{id}
-DELETE /api/products/{id}
-POST   /api/products/{id}/stock-adjustments
-
-GET    /api/customers
-GET    /api/customers/{id}
-POST   /api/customers
-PUT    /api/customers/{id}
-DELETE /api/customers/{id}
-
-GET    /api/sales
-GET    /api/sales/{id}
-POST   /api/sales
-
-GET    /api/invoices
-GET    /api/invoices/{id}
-POST   /api/invoices/{id}/payments
-DELETE /api/invoices/{id}
-
-GET    /api/dashboard/summary
-GET    /api/dashboard/alerts
-GET    /api/dashboard/transactions
-
-GET    /api/ledger
-
-GET    /api/reports/sales-summary
-GET    /api/reports/revenue-trend
-GET    /api/reports/payment-breakdown
-GET    /api/reports/product-performance
-GET    /api/reports/inventory-valuation
-GET    /api/reports/customer-performance
-GET    /api/reports/cash-flow
-GET    /api/reports/receivables-aging
-
-==================================================
-AVAILABLE INTENTS
-==================================================
-
-Use one of these whenever possible:
-
-dashboard_summary
-dashboard_alerts
-dashboard_transactions
-
-list_categories
-create_category
-update_category
-delete_category
-
-list_products
-search_products
-get_product
-create_product
-update_product
-delete_product
-adjust_stock
-
-list_customers
-search_customers
-get_customer
-create_customer
-update_customer
-delete_customer
-
-list_sales
-get_sale
-create_sale
-
-list_invoices
-get_invoice
-record_invoice_payment
-cancel_invoice
-
-get_company
-update_company
-
-list_ledger
-
-sales_summary
-revenue_trend
-payment_breakdown
-product_performance
-inventory_valuation
-customer_performance
-cash_flow
-receivables_aging
-
-get_current_user
-logout
-change_password
-
-unknown
-general_question
-
-==================================================
-OUTPUT FORMAT
-==================================================
-
-Always return exactly:
-
-{
-  "intent": "string",
-  "entities": {},
-  "parameters": {},
-  "actions": [],
-  "missingInformation": [],
-  "requiresConfirmation": false,
-  "originalQuery": "string"
-}
-
-Every action must be:
-
-{
-  "action": "string",
-  "method": "GET|POST|PUT|PATCH|DELETE",
-  "endpoint": "/api/...",
-  "parameters": {},
-  "body": {},
-  "requiresConfirmation": false,
-  "reason": "string"
-}
-
-==================================================
-CRITICAL RULE
-==================================================
-
-NEVER invent IDs.
-
-If the user says:
-
-"Show Rahul's details"
-
-but Rahul's customer ID is unknown:
-
-First search customers.
-
-Example action:
-
-{
-  "action": "search_customers",
-  "method": "GET",
-  "endpoint": "/api/customers",
-  "parameters": {
-    "search": "Rahul"
-  },
-  "body": {},
-  "requiresConfirmation": false,
-  "reason": "Find the customer before retrieving details."
-}
-
-If a later action needs the ID from the first action,
-use:
-
-$action[0].result.data.id
-
-or an appropriate path into the previous result.
-
-Do NOT invent:
-
-CUST-001
-PRD-101
-INV-2026-001
-SALE-1001
-
-unless the user explicitly provided that identifier.
-
-==================================================
-MULTI-STEP ACTIONS
-==================================================
-
-You may return multiple actions.
-
-Example:
-
-"Find Rahul and show his invoice."
-
-Return:
-
-1. Search customer Rahul.
-2. Use the resulting customer information to locate the relevant invoice.
-
-Another example:
-
-"Find Parle-G and add 50 to its stock."
-
-Return:
-
-1. Search product Parle-G.
-2. Adjust its stock using the resulting product ID.
-
-==================================================
-CONFIRMATION
-==================================================
-
-These actions are potentially destructive or financially significant:
-
-- create sale
-- create product
-- update product
-- delete product
-- stock adjustment
-- create customer
-- update customer
-- delete customer
-- create category
-- update category
-- delete category
-- record invoice payment
-- cancel invoice
-- update company
-- change password
-
-Set:
-
-"requiresConfirmation": true
-
-for these actions unless the user's request explicitly confirms that the action should be performed.
-
-Read-only actions do not require confirmation.
-
-==================================================
-CONVERSATIONAL CONFIRMATION
-==================================================
-
-If the user says:
-
-"Yes"
-"Do it"
-"Confirm"
-"Proceed"
-"Go ahead"
-"Yes, cancel it"
-
-and the previous assistant request was waiting for confirmation,
-treat that as confirmation.
-
-==================================================
-PRODUCTS
-==================================================
-
-Understand:
-
-- name
-- SKU
-- category
-- stock
-- minimum stock
-- price
-- MRP
-- status
-- active/inactive
-- low stock
-- out of stock
-
-Examples:
-
-"Show low stock products"
-
-→ GET /api/products
-
-Use the appropriate query parameters.
-
-"Find Maggi"
-
-→ GET /api/products
-
-with a search/name parameter.
-
-"Add 50 Parle-G to stock"
-
-→ first find Parle-G if ID is unknown,
-then POST:
-
-/api/products/{id}/stock-adjustments
-
-Never update stock through PUT /api/products/{id}.
-
-==================================================
-CUSTOMERS
-==================================================
-
-Understand:
-
-- name
-- phone
-- email
-- address
-- customer ID
-
-If the customer is not uniquely identifiable,
-do not guess.
-
-==================================================
-SALES
-==================================================
-
-POST /api/sales creates a complete transaction.
-
-The server calculates:
-
-- subtotal
-- tax
-- discount
-- grand total
-- stock movement
-- invoice
-- payment
-- ledger
-
-Do NOT invent or override calculated financial values.
-
-The backend documentation explicitly states that client-supplied subtotal,
-taxAmount, discountAmount and grandTotal are ignored and recalculated
-from catalogue data.
-
-==================================================
-INVOICES
-==================================================
-
-GET /api/invoices/{id}
-
-retrieves an invoice.
-
-POST /api/invoices/{id}/payments
-
-records a payment.
-
-DELETE /api/invoices/{id}
-
-cancels an invoice.
-
-Payments and cancellation require confirmation.
-
-==================================================
-REPORTS
-==================================================
-
-"How much did we sell this month?"
-
-→ sales_summary
-
-"Show revenue trend"
-
-→ revenue_trend
-
-"Which products sold best?"
-
-→ product_performance
-
-"How much inventory do we have?"
-
-→ inventory_valuation
-
-"Who are our best customers?"
-
-→ customer_performance
-
-"Show cash flow"
-
-→ cash_flow
-
-"Who owes us money?"
-
-→ receivables_aging
-
-==================================================
-DATES
-==================================================
-
-Understand:
-
-today
-yesterday
-this week
-last week
-this month
-last month
-this year
-last year
-
-Use dateFrom/dateTo where supported.
-
-Use ISO date format:
-
-YYYY-MM-DD
-
-Do not invent dates.
-
-==================================================
-MONEY
-==================================================
-
-Understand Indian currency:
-
-₹5000
-₹5,000
-Rs 5000
-5000 rupees
-5k
-5 thousand
-
-Convert to numeric values.
-
-==================================================
-MISSING INFORMATION
-==================================================
-
-If required information is missing, do NOT guess.
-
-Example:
-
-"Create a sale"
-
-Return:
-
-"missingInformation": [
-  "customer or walk-in sale information",
-  "products",
-  "quantities"
-]
-
-and no executable sale action.
-
-==================================================
-AMBIGUITY
-==================================================
-
-If multiple customers/products could match,
-do not automatically choose one.
-
-Return the search action first or request clarification.
-
-==================================================
-SECURITY
-==================================================
-
-Never expose:
-
-- JWT tokens
-- API keys
-- passwords
-- database credentials
-- internal secrets
-
-Never attempt to bypass authorization.
-
-==================================================
-FINAL RULE
-==================================================
-
-Your output is consumed directly by a Node.js action executor.
-
-Therefore:
-- valid JSON only
-- no Markdown
-- no comments
-- no extra text
-- no unsupported endpoint
-- no invented data
-- no invented IDs
-- no arbitrary URLs
-`;
-
-
-/*
-|--------------------------------------------------------------------------
-| PARSE USER REQUEST
-|--------------------------------------------------------------------------
-*/
-
-async function decodeUserRequest(
-    userMessage,
-    conversation = []
-) {
-    const contextText =
-        Array.isArray(conversation) &&
-        conversation.length
-            ? `
-CONVERSATION HISTORY:
-
-${conversation
-    .slice(-10)
-    .map(message => {
-        const role =
-            message.role || "user";
-
-        const content =
-            message.content ||
-            message.message ||
-            "";
-
-        return `${role}: ${content}`;
-    })
-    .join("\n")}
-`
-            : "";
-
-    const prompt = `
-${contextText}
-
-CURRENT USER REQUEST:
-
-${userMessage}
-`;
-
-    const response =
-        await ai.models.generateContent({
-            model: "gemini-3.8-flash",
-
-            config: {
-                systemInstruction:
-                    SYSTEM_INSTRUCTION,
-
-                responseMimeType:
-                    "application/json"
-            },
-
-            contents: prompt
-        });
-
-    return safeJsonParse(
-        response.text
-    );
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| GENERATE FINAL HUMAN RESPONSE
-|--------------------------------------------------------------------------
-*/
-
-async function generateFinalResponse(
-    userMessage,
-    plan,
-    executionResults
-) {
-    const responsePrompt = `
-You are the final response generator for FlowPilot.
-
-The user asked:
-
-${userMessage}
-
-The AI created this action plan:
-
-${JSON.stringify(
-    plan,
-    null,
-    2
-)}
-
-The backend executed these actions:
-
-${JSON.stringify(
-    executionResults,
-    null,
-    2
-)}
-
-Respond naturally to the user.
-
-Rules:
-
-1. Be concise and useful.
-2. Explain what actually happened.
-3. Never claim an action succeeded if it failed.
-4. If an API operation failed, clearly explain the failure.
-5. For lists, summarize useful information instead of dumping huge JSON.
-6. For financial information, preserve exact values from the API.
-7. For created records, mention their returned IDs/numbers.
-8. For stock operations, mention the product and resulting information when available.
-9. If confirmation is required and the action was NOT executed, clearly ask for confirmation.
-10. Never expose JWT tokens, API keys, internal errors, stack traces, or secrets.
-11. Do not mention Gemini.
-12. Do not mention the action executor.
-13. Do not mention internal API endpoints.
-14. Return plain text only.
-`;
-
-    const response =
-        await ai.models.generateContent({
-            model: "gemini-3.8-flash",
-
-            config: {
-                systemInstruction:
-                    "You are the FlowPilot user-facing response generator."
-            },
-
-            contents: responsePrompt
-        });
-
-    return response.text;
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| MAIN CHAT ENDPOINT
-|--------------------------------------------------------------------------
-*/
-
-app.post(
-    "/api/chat",
-    async (req, res) => {
-        try {
-            const userMessage =
-                req.body?.message;
-
-            const conversation =
-                req.body?.conversation || [];
-
-            const confirmed =
-                req.body?.confirmed === true;
-
-            if (
-                !userMessage ||
-                typeof userMessage !== "string"
-            ) {
-                return res.status(400).json({
-                    error:
-                        "Message is required"
-                });
-            }
-
-            console.log(
-                "\n========================================"
-            );
-
-            console.log(
-                "User:",
-                userMessage
-            );
-
-            /*
-             * STEP 1
-             * Ask Gemini to decode the request.
-             */
-
-            const plan =
-                await decodeUserRequest(
-                    userMessage,
-                    conversation
-                );
-
-            console.log(
-                "AI Plan:",
-                JSON.stringify(
-                    plan,
-                    null,
-                    2
-                )
-            );
-
-            if (
-                !plan ||
-                !Array.isArray(plan.actions)
-            ) {
-                throw new Error(
-                    "AI returned an invalid action plan."
-                );
-            }
-
-            /*
-             * Normalize actions.
-             */
-
-            const actions =
-                plan.actions
-                    .map(normalizeAction)
-                    .filter(Boolean);
-
-            /*
-             * STEP 2
-             * Validate actions before execution.
-             */
-
-            const validationErrors = [];
-
-            for (
-                const action
-                of actions
-            ) {
-                if (
-                    !isAllowedRoute(
-                        action.method,
-                        action.endpoint
-                    )
-                ) {
-                    validationErrors.push(
-                        `${action.method} ${action.endpoint}`
-                    );
-                }
-            }
-
-            if (
-                validationErrors.length
-            ) {
-                return res.status(400).json({
-                    error:
-                        "AI requested unsupported API actions.",
-                    blockedActions:
-                        validationErrors,
-                    plan
-                });
-            }
-
-            /*
-             * STEP 3
-             * Check confirmation.
-             */
-
-            const actionsNeedingConfirmation =
-                actions.filter(action => {
-                    return (
-                        requiresConfirmation(
-                            action.method,
-                            action.endpoint
-                        ) ||
-                        action.requiresConfirmation
-                    );
-                });
-
-            if (
-                actionsNeedingConfirmation.length &&
-                !confirmed
-            ) {
-                const confirmationPlan = {
-                    ...plan,
-                    actions:
-                        actions.map(
-                            action => ({
-                                ...action,
-                                requiresConfirmation:
-                                    actionsNeedingConfirmation.includes(
-                                        action
-                                    )
-                            })
-                        ),
-                    requiresConfirmation:
-                        true
-                };
-
-                const confirmationMessage =
-                    await generateFinalResponse(
-                        userMessage,
-                        confirmationPlan,
-                        []
-                    );
-
-                return res.json({
-                    success: true,
-
-                    executed: false,
-
-                    requiresConfirmation:
-                        true,
-
-                    reply:
-                        confirmationMessage,
-
-                    plan:
-                        confirmationPlan,
-
-                    results: []
-                });
-            }
-
-            /*
-             * STEP 4
-             * Execute actions sequentially.
-             *
-             * Sequential execution is important because
-             * later actions may depend on previous results.
-             */
-
-            const actionResults = [];
-
-            for (
-                let i = 0;
-                i < actions.length;
-                i++
-            ) {
-                const action =
-                    actions[i];
-
-                try {
-                    const result =
-                        await executeAction(
-                            action,
-                            actionResults
-                        );
-
-                    actionResults.push({
-                        actionIndex: i,
-                        success: true,
-                        action,
-                        result
-                    });
-
-                } catch (error) {
-                    console.error(
-                        `Action ${i} failed:`,
-                        error
-                    );
-
-                    actionResults.push({
-                        actionIndex: i,
-                        success: false,
-                        action,
-                        error: {
-                            message:
-                                error.message,
-                            status:
-                                error.status || 500,
-                            response:
-                                error.response || null
-                        }
-                    });
-
-                    /*
-                     * Stop execution if an action fails.
-                     *
-                     * This prevents later dependent actions
-                     * from executing with invalid data.
-                     */
-
-                    break;
-                }
-            }
-
-            /*
-             * STEP 5
-             * Generate a human-readable response.
-             */
-
-            const finalReply =
-                await generateFinalResponse(
-                    userMessage,
-                    plan,
-                    actionResults
-                );
-
-            /*
-             * STEP 6
-             * Return everything useful to frontend.
-             */
-
-            const allSuccessful =
-                actionResults.length ===
-                    actions.length &&
-                actionResults.every(
-                    result =>
-                        result.success
-                );
-
-            return res.json({
-                success:
-                    allSuccessful,
-
-                executed: true,
-
-                requiresConfirmation:
-                    false,
-
-                reply:
-                    finalReply,
-
-                plan: {
-                    ...plan,
-                    actions
-                },
-
-                results:
-                    actionResults
-            });
-
-        } catch (error) {
-            console.error(
-                "AI Backend Error:",
-                error
-            );
-
-            return res.status(500).json({
-                success: false,
-
-                error:
-                    error.message ||
-                    "Internal server error"
-            });
-        }
-    }
-);
-
-
-/*
-|--------------------------------------------------------------------------
-| DIRECT ACTION EXECUTION ENDPOINT
-|--------------------------------------------------------------------------
-|
-| Useful for frontend confirmation.
-|
-| Instead of sending "yes" and hoping the AI understands
-| which action to execute, the frontend can send:
-|
-| POST /api/execute
-|
-| {
-|   "plan": {...},
-|   "confirmed": true
-| }
-|
-*/
-
-app.post(
-    "/api/execute",
-    async (req, res) => {
-        try {
-            const plan =
-                req.body?.plan;
-
-            const confirmed =
-                req.body?.confirmed === true;
-
-            if (!plan) {
-                return res.status(400).json({
-                    error:
-                        "Plan is required."
-                });
-            }
-
-            if (!confirmed) {
-                return res.status(400).json({
-                    error:
-                        "Confirmation is required."
-                });
-            }
-
-            if (
-                !Array.isArray(
-                    plan.actions
-                )
-            ) {
-                return res.status(400).json({
-                    error:
-                        "Plan contains no actions."
-                });
-            }
-
-            const actions =
-                plan.actions
-                    .map(normalizeAction)
-                    .filter(Boolean);
-
-            /*
-             * Validate every endpoint again.
-             */
-
-            for (
-                const action
-                of actions
-            ) {
-                if (
-                    !isAllowedRoute(
-                        action.method,
-                        action.endpoint
-                    )
-                ) {
-                    return res.status(400).json({
-                        error:
-                            `Blocked API action: ${action.method} ${action.endpoint}`
-                    });
-                }
-            }
-
-            const results = [];
-
-            for (
-                let i = 0;
-                i < actions.length;
-                i++
-            ) {
-                const action =
-                    actions[i];
-
-                try {
-                    const result =
-                        await executeAction(
-                            action,
-                            results
-                        );
-
-                    results.push({
-                        actionIndex: i,
-                        success: true,
-                        action,
-                        result
-                    });
-
-                } catch (error) {
-                    results.push({
-                        actionIndex: i,
-                        success: false,
-                        action,
-                        error: {
-                            message:
-                                error.message,
-                            status:
-                                error.status ||
-                                500,
-                            response:
-                                error.response ||
-                                null
-                        }
-                    });
-
-                    break;
-                }
-            }
-
-            return res.json({
-                success:
-                    results.length ===
-                        actions.length &&
-                    results.every(
-                        item =>
-                            item.success
-                    ),
-
-                executed: true,
-
-                results
-            });
-
-        } catch (error) {
-            console.error(
-                "Execute Error:",
-                error
-            );
-
-            return res.status(500).json({
-                success: false,
-                error:
-                    error.message ||
-                    "Execution failed"
-            });
-        }
-    }
-);
-
-
-/*
-|--------------------------------------------------------------------------
-| HEALTH CHECK
-|--------------------------------------------------------------------------
-*/
-
-app.get(
-    "/health",
-    (req, res) => {
-        res.json({
-            status: "ok",
-            service:
-                "FlowPilot AI Backend",
-            flowpilotApi:
-                FLOWPILOT_API_URL,
-            timestamp:
-                new Date().toISOString()
-        });
-    }
-);
-
-
-/*
-|--------------------------------------------------------------------------
-| START SERVER
-|--------------------------------------------------------------------------
-*/
-
-app.listen(
-    PORT,
-    () => {
-        console.log(
-            "========================================"
-        );
-
-        console.log(
-            `FlowPilot AI Backend running on http://localhost:${PORT}`
-        );
-
-        console.log(
-            `FlowPilot API: ${FLOWPILOT_API_URL}`
-        );
-
-        console.log(
-            `Gemini configured: ${Boolean(GEMINI_API_KEY)}`
-        );
-
-        console.log(
-            `FlowPilot JWT configured: ${Boolean(FLOWPILOT_JWT_TOKEN)}`
-        );
-
-        console.log(
-            "========================================"
-        );
-    }
-);
-```
