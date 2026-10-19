@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { Suspense, useState, useMemo, useEffect, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ShoppingCart,
@@ -33,7 +33,21 @@ const PAYMENT_STATUSES = ['all', 'Paid', 'Partial', 'Pending', 'Overdue'];
 /** Max rows the picker dropdowns will fetch — matches the API's `MAX_LIMIT`. */
 const PICKER_LIMIT = 100;
 
+/**
+ * Next 16 requires any route that calls `useSearchParams()` to be wrapped in a
+ * `<Suspense>` boundary, or `next build` fails with
+ * `missing-suspense-with-csr-bailout`. The inner component holds all the logic;
+ * this shell exists purely to satisfy that rule.
+ */
 export default function SalesPage() {
+  return (
+    <Suspense fallback={null}>
+      <SalesPageInner />
+    </Suspense>
+  );
+}
+
+function SalesPageInner() {
   const { createSale, revision } = useData();
   const { success, error: errorToast } = useToast();
   const router = useRouter();

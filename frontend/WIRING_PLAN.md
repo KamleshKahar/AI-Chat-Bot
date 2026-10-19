@@ -572,3 +572,118 @@ emits — same field names, same payment-mode and payment-method mapping.
 
 At every step: `npm run verify` must stay green, and the four silent bugs (3a.1,
 3a.2, 4b, 4d) are the ones that will not announce themselves.
+
+---
+
+# Phase 7 — AI Assistant UI (`/chat`)
+
+Status: **complete.** The AI backend (`ai-backend/server.js`) and the transport
+(`lib/aiClient.js`, the `/api/ai/*` rewrite, the `proxy.js` bearer lift) were
+already wired end-to-end; what never existed was the interface. This phase adds
+it, plus two small fixes the feature depended on.
+
+## Decisions
+
+**A dedicated page, not a widget (for now).** `/chat` lives inside the
+`(dashboard)` group, so it inherits the proxy's auth redirect and the dashboard
+shell for free. A floating launcher is a deliberate follow-up, not forgotten
+work.
+
+**Confirmation executes via `/api/execute`, never a second `/api/chat`.**
+Re-sending the original message with `confirmed: true` would let Gemini
+*regenerate* the plan the user just approved — the executed actions could
+differ from the reviewed ones. `POST /api/execute` replays the exact approved
+plan. The consequence: that endpoint returns no `reply` (it skips Gemini
+entirely), so the confirmation turn's text is built locally from `results`
+(`buildExecutionSummary`) — "Done", "Partially done — N of M", or "Nothing was
+executed". Wording never overstates a partial run.
+
+**The plan card is the safety story.** `components/chat/PlanCard.js` shows every
+action's method, endpoint, reason, and payload before anything runs, and is
+latched once decided — buttons are replaced by a status line, so a second click
+can never re-fire the same plan. A `DELETE` anywhere in the plan turns the
+confirm button red.
+
+**localStorage returns — for one narrow thing.** The backend takes the
+`conversation` array from the client, so history has to live somewhere between
+reloads. `lib/chatStore.js` is now the only module in the app that touches
+`localStorage`, and this is a considered exception, not a regression: chat
+history is convenience context read by exactly one consumer, and a stale or
+tampered entry can lose a conversation but can never corrupt business state —
+which is why the original migration removed localStorage in the first place.
+Mitigations: namespaced key (`flowpilot_chat_v1`), 40-entry cap with oldest
+evicted, corrupt JSON degrades to `[]`, Clear-history button, and only the last
+10 turns are sent to the model (matching the backend's own `slice(-10)`, so the
+injection surface does not grow with the stored thread). The session token is
+still never near it.
+
+**AI writes invalidate the world.** The assistant mutates data through the API,
+bypassing `DataContext` mutations, so any executed plan containing a non-GET
+action calls `invalidate()` — open list pages re-read on the next paint. Read
+queries skip it to avoid pointless refetches.
+
+**Model ID became config.** The two Gemini calls previously hardcoded different
+model IDs (`gemini-3.7-flash` for planning, `gemini-3.8-flash` for replies);
+either being unavailable to an API key was a whole-feature outage. Both now use
+one `GEMINI_MODEL` env var (default `gemini-3.7-flash`) — documented in
+`ai-backend/.env.example` and `ai-backend/README.md`.
+
+**The Suspense debt was paid here too.** `sales`, `inventory`, and `customers`
+called `useSearchParams()` bare, which per Next 16 docs fails `next build` with
+`missing-suspense-with-csr-bailout`. Each page's default export is now a thin
+`<Suspense>` shell around the original component (renamed `…PageInner`); no
+logic moved. This was a prerequisite, not a side effect: `next build` is the
+only static check available in this project and it must be green before any new
+JSX can be trusted.
+
+## Layout of the new code
+
+| File | Role |
+| --- | --- |
+| `app/(dashboard)/chat/page.js` | Thread state, send/confirm/cancel flows, composer (Enter to send), hydration from storage in an effect (not initial state — the route is prerendered, so a storage-backed first paint would mismatch the server HTML) |
+| `components/chat/ChatMessage.js` | One turn; plain-text rendering only — model output is untrusted input and never touches `dangerouslySetInnerHTML` |
+| `components/chat/PlanCard.js` | The confirmation gate (see above) |
+| `components/chat/ActionResults.js` | Per-action ✓/✗, deep links from entity codes (`INV-`/`SALE-` → invoice detail, `PRD-` → inventory, `CUST-` → customers), and a "stopped at step N of M" banner when the chain halted |
+| `components/chat/SuggestionChips.js` | Empty-state starters; includes one write request so the confirmation flow is discoverable |
+| `lib/chatStore.js` | Persistence + `toConversation()` mapping (error turns are excluded from model context) |
+
+## Verification
+
+| Check | Result |
+| --- | --- |
+| `npm run verify` | All 11 billing assertions pass; **175 imports resolved** (161 pre-phase), zero missing exports |
+| `next build` | Clean — 14 routes, `/chat` static, the three Suspense pages prerender |
+| `node --check ai-backend/server.js` | OK after the `GEMINI_MODEL` and request-body changes |
+
+HTTP-level runtime checks against the live stack (admin session, both services
+up):
+
+| Check | Result |
+| --- | --- |
+| Login → JWT | pass |
+| `/api/chat` without a bearer token | `401`, relayed |
+| Read query ("Which products are low on stock?") | `executed: true` with `reply` + `results` — proves the `GEMINI_MODEL` default works end-to-end |
+| Write query ("Increase stock of PRD-101 by 3 units") | `requiresConfirmation: true`, `executed: false`, plan with one action |
+| `POST /api/execute` with the approved plan | per-action `results`, every action succeeded |
+| The write landed | PRD-101 stock `41 → 44` (rolled back to `41` after the check) |
+| Anonymous `GET /chat` | `307 /login?next=%2Fchat` — `proxy.js` covers the new route |
+
+**The write check surfaced and fixed a real pre-existing bug.** The system
+instruction never taught the model any request-body schema, so Gemini had been
+guessing every write payload. For stock adjustments it guessed
+`{"quantity":3,"type":"increase"}` — the backend requires
+`{"mode":"add"|"remove","quantity":<positive int>}` — and every adjustment
+failed `422` at execution time (safely, but the marquee write flow was dead).
+`SYSTEM_INSTRUCTION` now carries a REQUEST BODIES section with the exact
+authoritative shapes for every write endpoint in the allowlist (stock
+adjustments, sales, payments, product/customer/category creates and updates,
+company, change-password), transcribed from `backend/src/schemas/validators.js`.
+
+Still browser-only (not exercised here): the authenticated `/chat` render, the
+cancel button, a VIEWER permission failure, the partial-failure banner,
+storage-persisted history across reload, and the ai-backend-down inline error.
+The transport they sit on is verified above; each follows the same patterns as
+the rest of the app, but they are exactly what to click through first — as
+WIRING_PLAN's own history notes, the failures that survive a green build are
+the runtime ones.
+

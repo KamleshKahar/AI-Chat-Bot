@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo, useEffect, useRef } from 'react';
+import React, { Suspense, useState, useMemo, useEffect, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { UserPlus, Users, Wallet, UserCheck, Trash2, Eye, Pencil } from 'lucide-react';
 import { useData } from '@/context/DataContext';
@@ -19,7 +19,21 @@ import { CustomerDetailModal } from '@/components/customers/CustomerDetailModal'
 
 const PER_PAGE = 10;
 
+/**
+ * Next 16 requires any route that calls `useSearchParams()` to be wrapped in a
+ * `<Suspense>` boundary, or `next build` fails with
+ * `missing-suspense-with-csr-bailout`. The inner component holds all the logic;
+ * this shell exists purely to satisfy that rule.
+ */
 export default function CustomersPage() {
+  return (
+    <Suspense fallback={null}>
+      <CustomersPageInner />
+    </Suspense>
+  );
+}
+
+function CustomersPageInner() {
   const { addCustomer, updateCustomer, deleteCustomer, revision } = useData();
   const { success, error: errorToast } = useToast();
 
