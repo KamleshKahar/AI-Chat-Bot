@@ -43,10 +43,13 @@ const UNAUTHORIZED_EVENT = 'flowpilot:session-expired';
  *
  * Every page fires several requests on mount; without this guard a single
  * expired token would dispatch N events and N redirects.
+ *
+ * Exported so other same-origin clients (e.g. the AI chat client) that do not
+ * go through `request()` can reuse the exact same recovery path.
  */
 let sessionExpiryHandled = false;
 
-function notifySessionExpired() {
+export function notifySessionExpired() {
   if (sessionExpiryHandled) return;
   sessionExpiryHandled = true;
   if (typeof window === 'undefined') return;
