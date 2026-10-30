@@ -24,6 +24,7 @@ const NAV_ITEMS = [
   { name: 'Sales & POS', href: '/sales', icon: ShoppingCart },
   { name: 'Invoices', href: '/invoices', icon: FileText },
   { name: 'Reports', href: '/reports', icon: BarChart3 },
+  { name: 'AI Assistant', href: '/chat', icon: Sparkles },
 ];
 
 export function Sidebar({ isOpen, onClose }) {

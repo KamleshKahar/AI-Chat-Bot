@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { Suspense, useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import {
   PackagePlus,
@@ -30,7 +30,21 @@ import { StockAdjustmentModal } from '@/components/inventory/StockAdjustmentModa
 
 const PER_PAGE = 10;
 
+/**
+ * Next 16 requires any route that calls `useSearchParams()` to be wrapped in a
+ * `<Suspense>` boundary, or `next build` fails with
+ * `missing-suspense-with-csr-bailout`. The inner component holds all the logic;
+ * this shell exists purely to satisfy that rule.
+ */
 export default function InventoryPage() {
+  return (
+    <Suspense fallback={null}>
+      <InventoryPageInner />
+    </Suspense>
+  );
+}
+
+function InventoryPageInner() {
   const { categories, addProduct, updateProduct, deleteProduct, adjustStock, revision } =
     useData();
   const { success, error: errorToast } = useToast();

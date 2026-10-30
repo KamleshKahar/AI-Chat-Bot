@@ -192,6 +192,19 @@ Your Google Gemini API key.
 GEMINI_API_KEY=your_gemini_api_key
 ```
 
+### GEMINI_MODEL
+
+The Gemini model used for **both** pipeline calls — action planning
+(`decodeUserRequest`) and the user-facing reply (`generateFinalResponse`).
+
+```env
+GEMINI_MODEL=gemini-3.7-flash
+```
+
+Optional; defaults to `gemini-3.7-flash`. Set it if that model ID is not
+available to your API key. Previously the two call sites hardcoded different
+model IDs, so a single unavailable ID broke every chat turn.
+
 ### FLOWPILOT_API_URL
 
 The URL of the FlowPilot backend API.

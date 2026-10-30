@@ -23,6 +23,17 @@ if (!GEMINI_API_KEY) {
 }
 
 /*
+ * One model for the whole pipeline (planning + user-facing replies).
+ *
+ * Override with GEMINI_MODEL in .env to point at any Gemini model your API
+ * key can access — no code change needed. The previous hardcoded IDs differed
+ * between the two call sites, which made a single bad ID a whole-feature
+ * outage.
+ */
+const GEMINI_MODEL =
+    process.env.GEMINI_MODEL?.trim() || "gemini-3.7-flash";
+
+/*
  * Authentication is per-request, not per-process.
  *
  * The AI backend acts on behalf of the signed-in user: every incoming request
@@ -906,6 +917,120 @@ Every action must be:
 }
 
 ==================================================
+REQUEST BODIES
+==================================================
+
+Use these EXACT field names and values for write
+actions. The API silently discards unknown fields
+and rejects missing required fields with 422.
+
+POST /api/products/{id}/stock-adjustments
+
+{
+  "mode": "add",
+  "quantity": 3,
+  "reason": "Restock",
+  "notes": "optional"
+}
+
+"mode" accepts ONLY "add" or "remove", and
+"quantity" is ALWAYS a positive integer.
+There is no "type", "increase" or "decrease" field.
+To remove stock, use mode "remove" with a positive quantity.
+
+POST /api/sales
+
+{
+  "customerId": "$action[0].result.data.id",
+  "items": [
+    {
+      "productId": "$action[1].result.data.id",
+      "quantity": 2
+    }
+  ],
+  "discountType": "percent",
+  "discountValue": 5,
+  "shippingCharges": 0,
+  "paymentMode": "full",
+  "paymentAmount": 0,
+  "paymentMethod": "UPI",
+  "notes": "optional"
+}
+
+- items is required, at least one entry.
+- productId accepts a code such as PRD-101.
+- unitPrice per item is optional; the server re-reads
+  the authoritative catalogue price.
+- discountType is "percent" or "flat".
+- paymentMode is "full", "partial" or "none".
+  paymentAmount must be greater than 0 when
+  paymentMode is "partial".
+- paymentMethod is one of: "UPI", "Cash",
+  "Bank Transfer", "Cheque", "Credit Card", "COD".
+
+POST /api/invoices/{id}/payments
+
+{
+  "amount": 5000,
+  "paymentMethod": "UPI",
+  "reference": "optional",
+  "notes": "optional"
+}
+
+- amount must be greater than 0 and cannot
+  exceed the balance due.
+
+POST /api/products  (create)
+
+Required: name, sku, category (code such as CAT-01
+or the category name), mrp, sellingPrice, costPrice.
+Optional: description, unit (default "pcs"),
+hsnCode, taxRate (default 18),
+stockQuantity (default 0),
+minStockLevel (default 10).
+sellingPrice cannot exceed mrp, and costPrice
+cannot exceed sellingPrice.
+
+PUT /api/products/{id}  (update)
+
+Send ONLY the changed fields, same names as create.
+Stock is NEVER updatable here — use the
+stock-adjustments endpoint.
+
+POST /api/customers  (create)
+
+Required: name, email, phone.
+Optional: company, address, city, state,
+pincode (6 digits), gstin (15 characters),
+creditLimit, outstandingBalance (opening balance),
+status ("active" or "inactive").
+
+PUT /api/customers/{id}  (update)
+
+Send ONLY the changed fields, same names as create.
+
+POST /api/categories  (create)
+
+Required: name.
+Optional: code, shortCode, description, isActive.
+
+PATCH /api/categories/{id}  (update)
+
+Send ONLY the changed fields.
+
+PUT /api/company  (update)
+
+Send ONLY the changed fields, for example:
+{ "invoiceTerms": "Payment due within 15 days" }
+
+POST /api/auth/change-password
+
+{
+  "currentPassword": "the user's current password",
+  "newPassword": "at least 8 characters"
+}
+
+==================================================
 CRITICAL RULE
 ==================================================
 
@@ -1290,7 +1415,7 @@ ${userMessage}
 
     const response =
         await ai.models.generateContent({
-            model: "gemini-3.7-flash",
+            model: GEMINI_MODEL,
 
             config: {
                 systemInstruction:
@@ -1365,7 +1490,7 @@ Rules:
 
     const response =
         await ai.models.generateContent({
-            model: "gemini-3.8-flash",
+            model: GEMINI_MODEL,
 
             config: {
                 systemInstruction:
