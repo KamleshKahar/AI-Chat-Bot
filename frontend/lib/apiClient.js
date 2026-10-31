@@ -49,6 +49,14 @@ const UNAUTHORIZED_EVENT = 'flowpilot:session-expired';
  */
 let sessionExpiryHandled = false;
 
+/**
+ * Endpoints whose 401 is a *credential* rejection rather than a dead session.
+ *
+ * They establish (or fail to establish) the session, so there is no session to
+ * tear down. Matched against the full request URL (`/api/auth/login`).
+ */
+const CREDENTIAL_PATHS = new Set(['/api/auth/login']);
+
 export function notifySessionExpired() {
   if (sessionExpiryHandled) return;
   sessionExpiryHandled = true;
@@ -130,7 +138,12 @@ async function request(path, { method = 'GET', body, query, signal, headers } = 
 
   if (!response.ok) {
     const error = payload?.error;
-    if (response.status === 401) notifySessionExpired();
+    // A 401 from the login endpoint means "wrong credentials", not "session
+    // expired" — routing it into the teardown machinery latched the sign-out
+    // guard while still on `/login` and silenced expiry notifications for the
+    // rest of the page's life. Only responses to authenticated requests can
+    // actually mean the session died.
+    if (response.status === 401 && !CREDENTIAL_PATHS.has(url)) notifySessionExpired();
     throw new ApiError(error?.message ?? `Request failed with status ${response.status}`, {
       status: response.status,
       code: error?.code ?? 'REQUEST_FAILED',

@@ -2,21 +2,31 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { Menu, Plus, RefreshCw, Bell, ChevronDown, LogOut, UserRound } from 'lucide-react';
+import { Menu, Plus, Bell, ChevronDown, LogOut, UserRound, KeyRound } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { useData } from '@/context/DataContext';
-import { useToast } from '@/context/ToastContext';
 import { useServerResource } from '@/hooks/useServerQuery';
 import { Button } from '@/components/ui/Button';
-import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
+import { ChangePasswordModal } from '@/components/users/ChangePasswordModal';
+
+/** Two-letter monogram from a display name; falls back to the email local part. */
+function monogram(user) {
+  const source = (user?.name || user?.email || '?').trim();
+  return (
+    source
+      .split(/\s+/)
+      .map((part) => part[0])
+      .slice(0, 2)
+      .join('')
+      .toUpperCase() || '?'
+  );
+}
 
 export function Header({ onMenuClick }) {
-  const { user, logout, planSessionEnd } = useAuth();
-  const { resetToDemoData, revision } = useData();
-  const { error } = useToast();
-  const [resetOpen, setResetOpen] = useState(false);
-  const [resetting, setResetting] = useState(false);
+  const { user, can, logout, changePassword } = useAuth();
+  const { revision } = useData();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
 
   /*
     The low-stock bell reads a server-side count rather than a client-side
@@ -30,47 +40,6 @@ export function Header({ onMenuClick }) {
   });
   const lowStockCount = alerts?.counts?.low_stock ?? 0;
 
-  /**
-   * Reset is a real server operation now, not a localStorage rewrite, so it can
-   * genuinely fail — ADMIN-only, and refused outright when the seed endpoint is
-   * disabled. Reporting success unconditionally here would tell the user their
-   * data was restored when it was not.
-   *
-   * The seed wipes the `users` table along with everything else and recreates
-   * the accounts under fresh primary keys, so the JWT this request was made with
-   * stops resolving — every subsequent call would 401. The session is therefore
-   * ended deliberately, on the way to a login page that explains why, rather
-   * than letting the user get bounced by a confusing mid-session 401.
-   */
-  const handleReset = async () => {
-    /*
-     * Declared before the reset, not after. The reset recreates every account,
-     * so the caller's token stops resolving while `resetToDemoData()` is still
-     * in flight and the generic session-expiry teardown fires first — with no
-     * knowledge of why, it would land on a bare `/login` and the banner
-     * explaining that the data was restored would never be seen.
-     */
-    planSessionEnd('/login?reset=1');
-    setResetting(true);
-    try {
-      await resetToDemoData();
-      await logout();
-    } catch (err) {
-      error(
-        err.message ||
-          'Could not reset the demo data. This action requires an administrator and an enabled seed endpoint.'
-      );
-      /*
-       * Re-thrown on purpose. `ConfirmDialog` only closes when `onConfirm`
-       * resolves, so letting this propagate keeps the dialog open on failure —
-       * swallowing it here would close the dialog and imply the reset worked.
-       */
-      throw err;
-    } finally {
-      setResetting(false);
-    }
-  };
-
   return (
     <header className="sticky top-0 z-30 flex h-16 w-full items-center justify-between gap-3 border-b border-slate-200 bg-white/95 px-4 backdrop-blur-xs sm:px-6">
       <div className="flex items-center gap-3 min-w-0">
@@ -83,10 +52,6 @@ export function Header({ onMenuClick }) {
         </button>
 
         <div className="hidden items-center gap-2 md:flex">
-          <span className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700">
-            Live Demo
-          </span>
-          <span className="text-[11px] text-slate-400 font-medium">|</span>
           <span className="text-[11px] text-slate-600 font-medium">
             Currency: <span className="font-semibold text-slate-900">INR (₹)</span>
           </span>
@@ -95,22 +60,15 @@ export function Header({ onMenuClick }) {
 
       {/* Right actions */}
       <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          icon={RefreshCw}
-          onClick={() => setResetOpen(true)}
-          className="hidden lg:inline-flex text-xs"
-        >
-          Reset Demo Data
-        </Button>
-
-        <Link href="/sales?action=new">
-          <Button variant="primary" size="sm" icon={Plus} className="text-xs">
-            <span className="hidden sm:inline">New Sale</span>
-            <span className="sm:hidden">New</span>
-          </Button>
-        </Link>
+        {/* Gated like every other create action: a viewer has no `sale:create`. */}
+        {can('sale:create') && (
+          <Link href="/sales?action=new">
+            <Button variant="primary" size="sm" icon={Plus} className="text-xs">
+              <span className="hidden sm:inline">New Sale</span>
+              <span className="sm:hidden">New</span>
+            </Button>
+          </Link>
+        )}
 
         {/* Low stock indicator */}
         {lowStockCount > 0 && (
@@ -132,14 +90,14 @@ export function Header({ onMenuClick }) {
             className="flex items-center gap-2 rounded-lg py-1 pl-1 pr-2 hover:bg-slate-100 transition"
           >
             <span className="flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 bg-slate-900 text-[11px] font-semibold text-white">
-              {user?.avatar || 'KP'}
+              {monogram(user)}
             </span>
             <span className="hidden text-left sm:block">
               <span className="block text-xs font-semibold leading-tight text-slate-900">
-                {user?.name || 'Administrator'}
+                {user?.name || '—'}
               </span>
               <span className="block text-[10px] leading-tight text-slate-500">
-                {user?.role || 'Store Administrator'}
+                {user?.role || ''}
               </span>
             </span>
             <ChevronDown className="hidden h-3.5 w-3.5 text-slate-400 sm:block" />
@@ -159,12 +117,12 @@ export function Header({ onMenuClick }) {
               <button
                 onClick={() => {
                   setMenuOpen(false);
-                  setResetOpen(true);
+                  setPasswordOpen(true);
                 }}
                 className="flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-slate-50 transition"
               >
-                <RefreshCw className="h-4 w-4 text-slate-400" />
-                Reset demo data
+                <KeyRound className="h-4 w-4 text-slate-400" />
+                Change password
               </button>
 
               <button
@@ -179,16 +137,10 @@ export function Header({ onMenuClick }) {
         </div>
       </div>
 
-      <ConfirmDialog
-        isOpen={resetOpen}
-        onClose={() => setResetOpen(false)}
-        onConfirm={handleReset}
-        loading={resetting}
-        variant="danger"
-        title="Reset all demo data?"
-        message="This permanently deletes every customer, product, sale, invoice and ledger entry in the database, then re-seeds the original sample dataset. It requires an administrator account and cannot be undone."
-        confirmText="Reset Data"
-        cancelText="Keep My Data"
+      <ChangePasswordModal
+        isOpen={passwordOpen}
+        onClose={() => setPasswordOpen(false)}
+        onChange={changePassword}
       />
     </header>
   );

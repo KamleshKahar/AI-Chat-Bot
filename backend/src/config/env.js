@@ -1,6 +1,5 @@
 import 'dotenv/config';
 import { z } from 'zod';
-
 /**
  * Centralised, validated runtime configuration.
  * Everything the app needs is resolved once, here.
@@ -28,15 +27,6 @@ const schema = z.object({
   JWT_EXPIRES_IN: z.string().default('8h'),
 
   JSON_LIMIT: z.string().default('1mb'),
-
-  SEED_ADMIN_EMAIL: z.string().email().default('admin@flowpilot.in'),
-  SEED_ADMIN_PASSWORD: z.string().min(6).default('flowpilot123'),
-  SEED_ADMIN_NAME: z.string().default('Kamlesh Patel'),
-
-  ENABLE_SEED_ENDPOINT: z
-    .string()
-    .default('false')
-    .transform((v) => v === 'true'),
 });
 
 const parsed = schema.safeParse(process.env);

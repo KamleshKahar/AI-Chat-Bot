@@ -2,9 +2,10 @@
 
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { Layers, Lock, Mail, ArrowRight, ShieldCheck, User, Building2, Sparkles, RefreshCw } from 'lucide-react';
+import { Layers, Lock, Mail, ArrowRight, Sparkles, User, Building2 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import { useToast } from '@/context/ToastContext';
+import { apiGet } from '@/lib/apiClient';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 
@@ -15,32 +16,39 @@ const HIGHLIGHTS = [
 ];
 
 export default function LoginPage() {
-  const { login, demoCredentials } = useAuth();
+  const { login } = useAuth();
   const { success, error } = useToast();
   const router = useRouter();
 
-  const [email, setEmail] = useState(demoCredentials.email);
-  const [password, setPassword] = useState(demoCredentials.password);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [formError, setFormError] = useState('');
 
-  /*
-    Set when the header's "reset demo data" action ends the session on purpose
-    (the seed recreates every user account). A toast cannot carry this over
-    because it lives in the dashboard layout, which unmounts on redirect — so
-    the reason has to arrive in the URL and be rendered here instead.
-
-    Read in an effect, not during render: `/login` is statically prerendered, so
-    `window` does not exist on the server, and reading it in the initialiser
-    would both throw during the build and mismatch the server's markup.
-  */
-  const [resetNotice, setResetNotice] = useState(false);
+  /**
+   * First run: with no accounts in the database there is nothing to sign in
+   * to, so `/login` sends the visitor to the setup wizard instead of letting
+   * them guess at credentials that cannot exist.
+   *
+   * The check is deliberately not routed through AuthContext: that provider
+   * skips `/auth/me` on public routes and has no idea what "needs setup"
+   * means, while this page is the only place that needs to know.
+   */
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).get('reset') === '1') {
-      setResetNotice(true);
-    }
-  }, []);
+    let cancelled = false;
+    apiGet('/auth/setup-status')
+      .then(({ data }) => {
+        if (!cancelled && data?.needsSetup) router.replace('/setup');
+      })
+      .catch(() => {
+        // Backend unreachable — stay on the login form and surface the normal
+        // error path if they try to sign in.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -62,12 +70,6 @@ export default function LoginPage() {
       setFormError(res.error);
       error(res.error);
     }
-  };
-
-  const fillDemo = () => {
-    setEmail(demoCredentials.email);
-    setPassword(demoCredentials.password);
-    setFormError('');
   };
 
   return (
@@ -132,20 +134,9 @@ export default function LoginPage() {
           </div>
 
           <div className="bg-white py-8 px-6 sm:px-8 shadow-2xl rounded-2xl border border-slate-100">
-            {resetNotice && (
-              <div className="mb-5 flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3.5">
-                <RefreshCw className="w-4 h-4 text-emerald-600 mt-0.5 shrink-0" />
-                <p className="text-xs text-emerald-800 leading-relaxed">
-                  <span className="font-semibold">Sample data restored.</span> The reset also
-                  recreates every user account, so your previous session was closed. Sign in
-                  again to continue.
-                </p>
-              </div>
-            )}
-
             <h2 className="text-xl font-bold tracking-tight text-slate-900">Sign in</h2>
             <p className="text-sm text-slate-500 mt-1">
-              Welcome back. Enter your credentials to continue.
+              Enter your account details to continue.
             </p>
 
             <form className="space-y-4 mt-6" onSubmit={handleSubmit}>
@@ -160,7 +151,7 @@ export default function LoginPage() {
                   setEmail(e.target.value);
                   setFormError('');
                 }}
-                placeholder="admin@flowpilot.in"
+                placeholder="you@company.com"
               />
 
               <div className="relative">
@@ -202,21 +193,6 @@ export default function LoginPage() {
                 </p>
               )}
 
-              <div className="flex items-center justify-between">
-                <label htmlFor="remember" className="flex items-center gap-2 text-xs text-slate-600">
-                  <input
-                    id="remember"
-                    type="checkbox"
-                    defaultChecked
-                    className="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                  />
-                  Keep me signed in
-                </label>
-                <span className="text-xs text-slate-400 font-medium cursor-default">
-                  Demo environment
-                </span>
-              </div>
-
               <Button
                 type="submit"
                 variant="primary"
@@ -229,42 +205,10 @@ export default function LoginPage() {
                 Sign in to Dashboard
               </Button>
             </form>
-
-            {/* Demo credentials */}
-            <div className="mt-6 p-4 rounded-xl bg-slate-50 border border-slate-200">
-              <div className="flex items-center justify-between mb-2.5">
-                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
-                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                  <span>Demo credentials</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={fillDemo}
-                  className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 bg-indigo-50 px-2 py-1 rounded border border-indigo-200"
-                >
-                  Auto-fill
-                </button>
-              </div>
-
-              <div className="space-y-1.5 text-xs">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Email</span>
-                  <code className="font-mono font-medium text-slate-900 bg-white px-2 py-0.5 rounded border border-slate-200">
-                    {demoCredentials.email}
-                  </code>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-500">Password</span>
-                  <code className="font-mono font-medium text-slate-900 bg-white px-2 py-0.5 rounded border border-slate-200">
-                    {demoCredentials.password}
-                  </code>
-                </div>
-              </div>
-            </div>
           </div>
 
           <p className="mt-6 text-center text-xs text-slate-500">
-            FlowPilot v2.4 • Built with Next.js App Router &amp; Tailwind CSS
+            FlowPilot • Built with Next.js App Router &amp; Tailwind CSS
           </p>
         </div>
       </div>

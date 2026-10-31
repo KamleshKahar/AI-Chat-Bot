@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import {
   LayoutDashboard,
   Users,
+  UserCog,
   Package,
   ShoppingCart,
   FileText,
@@ -17,19 +18,44 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 
+/**
+ * Navigation, filtered by the signed-in user's permissions.
+ *
+ * Each entry may name a permission from the backend's matrix
+ * (`middleware/roles.js`, shipped on `/auth/me` as `permissions`); an entry
+ * without one is visible to every role. Hiding is a rendering convenience —
+ * the pages and the API behind them enforce the same rules server-side, so a
+ * hand-typed URL gets a clear "no access" panel rather than data.
+ */
 const NAV_ITEMS = [
   { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
   { name: 'Inventory', href: '/inventory', icon: Package },
   { name: 'Customers', href: '/customers', icon: Users },
   { name: 'Sales & POS', href: '/sales', icon: ShoppingCart },
   { name: 'Invoices', href: '/invoices', icon: FileText },
-  { name: 'Reports', href: '/reports', icon: BarChart3 },
+  { name: 'Reports', href: '/reports', icon: BarChart3, permission: 'report:read' },
+  { name: 'Users', href: '/users', icon: UserCog, permission: 'user:read' },
   { name: 'AI Assistant', href: '/chat', icon: Sparkles },
 ];
 
+/** Two-letter monogram from a display name; falls back to the email local part. */
+function monogram(user) {
+  const source = (user?.name || user?.email || '?').trim();
+  return (
+    source
+      .split(/\s+/)
+      .map((part) => part[0])
+      .slice(0, 2)
+      .join('')
+      .toUpperCase() || '?'
+  );
+}
+
 export function Sidebar({ isOpen, onClose }) {
   const pathname = usePathname();
-  const { user, logout } = useAuth();
+  const { user, can, logout } = useAuth();
+
+  const visibleItems = NAV_ITEMS.filter((item) => !item.permission || can(item.permission));
 
   return (
     <>
@@ -70,7 +96,7 @@ export function Sidebar({ isOpen, onClose }) {
               Operations
             </div>
 
-            {NAV_ITEMS.map((item) => {
+            {visibleItems.map((item) => {
               const Icon = item.icon;
               const isActive =
                 pathname === item.href ||
@@ -106,11 +132,11 @@ export function Sidebar({ isOpen, onClose }) {
         <div className="p-3 border-t border-slate-800 bg-slate-950/30">
           <div className="flex items-center gap-3 p-2.5 rounded-lg bg-slate-800/60 border border-slate-800/80 mb-2">
             <div className="w-8 h-8 rounded-full bg-indigo-500 text-white flex items-center justify-center font-bold text-xs shrink-0 ring-2 ring-indigo-400/20">
-              {user?.avatar || 'KP'}
+              {monogram(user)}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-white truncate">{user?.name || 'Administrator'}</p>
-              <p className="text-[11px] text-slate-400 truncate">{user?.email || 'admin@flowpilot.in'}</p>
+              <p className="text-xs font-semibold text-white truncate">{user?.name || '—'}</p>
+              <p className="text-[11px] text-slate-400 truncate">{user?.role || ''}</p>
             </div>
           </div>
 

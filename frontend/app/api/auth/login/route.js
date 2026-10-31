@@ -37,9 +37,17 @@ export async function POST(request) {
   const payload = await upstream.json().catch(() => null);
 
   if (!upstream.ok || !payload?.data?.token) {
+    // Always wrap in `{ error }`: `apiClient` reads `payload.error`. Returning
+    // `payload.error` itself — the backend's inner object — stripped the
+    // envelope, so the sign-in form showed a generic "Request failed with
+    // status 401" instead of "Invalid email or password".
     return NextResponse.json(
-      payload?.error ?? {
-        error: { status: upstream.status, message: 'Login failed', code: 'LOGIN_FAILED' },
+      {
+        error: payload?.error ?? {
+          status: upstream.status,
+          message: 'Login failed',
+          code: 'LOGIN_FAILED',
+        },
       },
       { status: upstream.status }
     );

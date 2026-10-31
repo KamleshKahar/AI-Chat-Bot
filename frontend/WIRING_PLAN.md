@@ -2,6 +2,16 @@
 
 Status: **complete — all six phases implemented and verified against the running API.**
 
+> **Superseded in part (multi-user refactor).** This document records the
+> localStorage→API wiring done *before* accounts existed. Everything below about
+> the seeded demo credentials, `demoCredentials` on `AuthContext`,
+> `resetToDemoData()`, the "Reset Demo Data" header action, and the
+> `/login?reset=1` banner describes a state of the code that no longer exists:
+> the seed pipeline was removed, accounts are created through the first-run
+> `/setup` wizard and the ADMIN-only `/users` screen, and the UI is gated by the
+> backend's permission matrix (`can(permission)`). The architectural record
+> below remains accurate; those specific artefacts are gone.
+
 `localStorage` no longer holds any application data. Filtering, sorting,
 pagination, search, and all money and aggregation math are server-side.
 Verified by `next build` (clean), `npm run verify` (billing parity + 161 imports),

@@ -94,7 +94,7 @@ export const authService = {
     return { success: true };
   },
 
-  /** Exposed so the seeder can reuse exactly the same hashing rules. */
+  /** Exposed so account-creation paths reuse exactly the same hashing rules. */
   hashPassword(plain) {
     return bcrypt.hash(plain, BCRYPT_ROUNDS);
   },

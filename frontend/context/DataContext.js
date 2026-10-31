@@ -202,17 +202,46 @@ export function DataProvider({ children }) {
   );
 
   /**
-   * Restore the seeded demo dataset.
+   * User administration. ADMIN-only upstream (`user:read` / `user:write`), so
+   * these reject with a 403 for anyone else — the `/users` page only mounts for
+   * an administrator, but the guard is the server's, not the UI's.
    *
-   * This is a destructive, ADMIN-only server operation gated behind
-   * `ENABLE_SEED_ENDPOINT` in `backend/.env`. It is not a client-side state
-   * reset any more, so failures are surfaced rather than swallowed.
+   * There is deliberately no `deleteUser`: accounts are deactivated, never
+   * destroyed, because every sale, payment and audit row points at a real
+   * person. A deactivated account simply cannot sign in.
    */
-  const resetToDemoData = useCallback(async () => {
-    const { data } = await apiPost('/seed/reset', {});
-    invalidate();
+
+  const createUser = useCallback(
+    async (userData) => {
+      const { data } = await apiPost('/users', userData);
+      invalidate();
+      return data;
+    },
+    [invalidate]
+  );
+
+  const updateUser = useCallback(
+    async (id, updatedData) => {
+      const { data } = await apiPatch(`/users/${encodeURIComponent(id)}`, updatedData);
+      invalidate();
+      return data;
+    },
+    [invalidate]
+  );
+
+  /**
+   * Reset a user's password. Omit `newPassword` and the server generates a
+   * temporary one, returned exactly once in the response — never stored in
+   * plain text anywhere.
+   *
+   * @returns {Promise<{ id: string, email: string, generated: boolean, tempPassword: string|null }>}
+   */
+  const resetUserPassword = useCallback(async (id, newPassword) => {
+    const { data } = await apiPost(`/users/${encodeURIComponent(id)}/reset-password`, {
+      ...(newPassword ? { newPassword } : {}),
+    });
     return data;
-  }, [invalidate]);
+  }, []);
 
   const value = useMemo(
     () => ({
@@ -241,7 +270,9 @@ export function DataProvider({ children }) {
       createSale,
       updateInvoicePayment,
 
-      resetToDemoData,
+      createUser,
+      updateUser,
+      resetUserPassword,
     }),
     [
       revision,
@@ -262,7 +293,9 @@ export function DataProvider({ children }) {
       deleteCategory,
       createSale,
       updateInvoicePayment,
-      resetToDemoData,
+      createUser,
+      updateUser,
+      resetUserPassword,
     ]
   );
 

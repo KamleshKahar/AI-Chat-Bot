@@ -17,31 +17,41 @@ cp .env.example .env          # then edit DATABASE_URL
 npm install
 npm run prisma:generate
 npm run migrate:deploy        # or `npm run migrate` while developing
-npm run seed                  # demo dataset + 4 role accounts
 npm start                     # http://localhost:4000
 ```
 
-Verify the whole contract end to end (in a second shell, against a seeded DB):
+No data is seeded. On the first visit the frontend opens the **setup wizard**
+(`POST /api/auth/setup`), which creates the initial administrator against the
+empty `users` table — and refuses with `409` the moment any account exists.
+
+Verify the whole contract end to end (in a second shell, against a running server):
 
 ```bash
 npm run smoke-test
 ```
 
-`scripts/smoke-test.js` is the acceptance test: **169 assertions** covering auth,
-CRUD, the billing engine, GST splitting, stock movement, the concurrency guard,
-the role matrix, every report, and the error envelopes. It exits non-zero on the
-first regression.
+`scripts/smoke-test.js` is the acceptance test: **190 assertions** covering
+first-run setup, auth, user administration, CRUD, the billing engine, GST
+splitting, stock movement, the concurrency guard, the role matrix, every report,
+and the error envelopes. It bootstraps its own accounts and restores the data
+baseline by the end. It exits non-zero on the first regression.
 
-### Seeded logins
+`npm test` runs the unit suite (`node --test`) — the permission matrix, the
+validation schemas, and the user-service guards (last-admin protection,
+self-action rules, duplicate email, the setup flow) against an in-memory fake,
+no database required.
 
-All four use the password `flowpilot123`.
+### Roles
 
-| Email | Role | Can |
-| --- | --- | --- |
-| `admin@flowpilot.in` | ADMIN | everything, including product deletion and re-seeding |
-| `manager@flowpilot.in` | MANAGER | catalogue, customers, sales, payments, reports |
-| `cashier@flowpilot.in` | CASHIER | ring up sales, adjust stock, read catalogue |
-| `viewer@flowpilot.in` | VIEWER | read-only, no reports |
+Accounts are created by an administrator from the `/users` screen. What each
+role can do is the deny-by-default matrix in `src/middleware/roles.js`:
+
+| Role | Can |
+| --- | --- |
+| ADMIN | everything, including user administration and product deletion |
+| MANAGER | catalogue, customers, sales, payments, reports |
+| CASHIER | ring up sales, adjust stock, read catalogue |
+| VIEWER | read-only, no reports |
 
 ---
 
@@ -53,8 +63,8 @@ All four use the password `flowpilot123`.
 | `npm run dev` | Run with `--watch` |
 | `npm run migrate` | Create + apply a migration (dev) |
 | `npm run migrate:deploy` | Apply pending migrations (prod) |
-| `npm run migrate:reset` | Drop, re-migrate, re-seed |
-| `npm run seed` | Seed the demo dataset (same code as `POST /api/seed/reset`) |
+| `npm run migrate:reset` | Drop and re-migrate (empty database — the setup wizard runs again) |
+| `npm test` | Unit tests (`node --test`, no database needed) |
 | `npm run smoke-test` | Full end-to-end acceptance test |
 | `npm run openapi` | Print the OpenAPI document (pass a path to write it) |
 | `npm run build` | Generate the Prisma client and validate the schema |
@@ -270,6 +280,7 @@ gets nothing, so adding a value to Prisma's enum cannot accidentally grant acces
 | Record payments | ✅ | ✅ | ❌ | ❌ |
 | View reports | ✅ | ✅ | ❌ | ❌ |
 | Delete products | ✅ | ❌ | ❌ | ❌ |
+| Manage users (create / edit / reset password / deactivate) | ✅ | ❌ | ❌ | ❌ |
 
 ### Validation highlights
 
@@ -294,8 +305,11 @@ gets nothing, so adding a value to Prisma's enum cannot accidentally grant acces
 - JSON body size limited by `JSON_LIMIT`
 - `morgan` request logging with a per-request id, echoed as `x-request-id`
 - audit log for every mutation, with the acting user and IP
-- `POST /api/seed/reset` destroys all data — it 404s unless
-  `ENABLE_SEED_ENDPOINT=true` **and** the caller is an ADMIN
+- first-run setup (`POST /api/auth/setup`) is public but self-closing: it only
+  succeeds while the `users` table is empty, serialised behind a MySQL advisory
+  lock so two simultaneous visitors cannot both create the first administrator
+- account safety rails: an administrator cannot change their own role/status,
+  and the last active administrator can never be demoted or deactivated
 
 ---
 
@@ -318,7 +332,6 @@ not a rewrite of the API layer or the frontend.
 
 `stock_movements` is the reason `products.stock_quantity` can be trusted: it is a
 full audit trail, and `SUM(quantity_delta)` reconciles to the live figure exactly.
-The seeder asserts this on every run.
 
 Every column is snake_case in the database, mapped to camelCase in Prisma. The raw
 SQL in `repositories/` relies on that convention, so keep `@map` on any new column.
@@ -337,8 +350,9 @@ See `.env.example`. The ones that matter:
 | `JWT_EXPIRES_IN` | `8h` | |
 | `CORS_ORIGINS` | `http://localhost:3000` | comma-separated |
 | `JSON_LIMIT` | `1mb` | |
-| `ENABLE_SEED_ENDPOINT` | `false` | |
-| `BCRYPT_ROUNDS` | `12` | |
+
+No account or dataset variables exist: accounts are created through the setup
+wizard and the `/users` API, never through configuration.
 
 ---
 
@@ -358,8 +372,9 @@ MySQL's wire protocol and fails with a confusing `HTTPParserError`.
 
 MySQL **8.0.46** with `sql_mode` = `ONLY_FULL_GROUP_BY, STRICT_TRANS_TABLES,
 NO_ZERO_IN_DATE, NO_ZERO_DATE, ERROR_FOR_DIVISION_BY_ZERO, NO_ENGINE_SUBSTITUTION`
-and `utf8mb4_0900_ai_ci`. A clean `npm run migrate` + `npm run seed` +
-`npm run smoke-test` passes **169/169**.
+and `utf8mb4_0900_ai_ci`. A clean `npm run migrate` + `npm run smoke-test`
+passes end to end (the smoke test performs first-run setup itself on an empty
+database).
 
 Two MySQL 8 specifics are load-bearing and already baked into the schema:
 

@@ -45,6 +45,82 @@ export const changePasswordSchema = z.object({
     .max(200),
 });
 
+/** Password rule shared by every way an account password can be set. */
+export const newPasswordSchema = z
+  .string()
+  .min(8, 'Password must be at least 8 characters')
+  .max(200);
+
+/**
+ * First-run setup: creates the very first ADMIN account (and optionally the
+ * company letterhead) while the `users` table is still empty. The endpoint is
+ * public but self-closing — it refuses with 409 the moment any account exists.
+ */
+export const setupCompanySchema = z.object({
+  name: trimmed(160, 'Company name is required'),
+  tagline: z.string().trim().max(255).nullish(),
+  gstin: gstinSchema.nullish(),
+  email: emailSchema.nullish(),
+  phone: z.string().trim().max(40).nullish(),
+  address: z.string().trim().max(255).nullish(),
+  city: z.string().trim().max(80).nullish(),
+  state: z.string().trim().max(80).nullish(),
+  pincode: pincodeSchema.nullish(),
+});
+
+export const setupSchema = z.object({
+  name: trimmed(120, 'Your name is required'),
+  email: emailSchema,
+  password: newPasswordSchema,
+  /** Optional second step of the wizard. */
+  company: setupCompanySchema.nullish(),
+});
+
+// ---------------------------------------------------------------------------
+// User management (ADMIN only)
+// ---------------------------------------------------------------------------
+
+export const roleEnum = z.enum(['ADMIN', 'MANAGER', 'CASHIER', 'VIEWER']);
+
+export const createUserSchema = z.object({
+  name: trimmed(120, 'Name is required'),
+  email: emailSchema,
+  password: newPasswordSchema,
+  role: roleEnum.default('VIEWER'),
+  phone: z.string().trim().max(40).nullish(),
+  isActive: z.coerce.boolean().default(true),
+});
+
+/**
+ * `email` is deliberately absent: changing the identifier an account signs in
+ * with is an out-of-band operation (re-verification), not an inline edit.
+ */
+export const updateUserSchema = z
+  .object({
+    name: trimmed(120, 'Name is required').optional(),
+    role: roleEnum.optional(),
+    phone: z.string().trim().max(40).nullish(),
+    isActive: z.coerce.boolean().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: 'Provide at least one field to update',
+  });
+
+/** Omitting `newPassword` asks the server to generate a temporary one. */
+export const resetPasswordSchema = z.object({
+  newPassword: newPasswordSchema.optional(),
+});
+
+export const userListQuerySchema = z.object({
+  search: z.string().trim().optional(),
+  role: roleEnum.optional(),
+  status: z.enum(['active', 'inactive']).optional(),
+  sort: z.enum(['name', 'email', 'role', 'recent', 'last_login']).default('name'),
+  order: z.enum(['asc', 'desc']).default('asc'),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
+
 // ---------------------------------------------------------------------------
 // Company profile
 // ---------------------------------------------------------------------------
