@@ -30,6 +30,49 @@ function rangeFilter(from, to, alias = Prisma.sql`i`) {
   return clauses.length ? Prisma.sql`AND ${Prisma.join(clauses, ' AND ')}` : Prisma.sql``;
 }
 
+/** Credit notes carry their own document date — filter on `credit_date`. */
+function creditRangeFilter(from, to) {
+  const clauses = [];
+  if (from) clauses.push(Prisma.sql`cn.credit_date >= ${from}`);
+  if (to) clauses.push(Prisma.sql`cn.credit_date <= ${to}`);
+  return clauses.length ? Prisma.sql`AND ${Prisma.join(clauses, ' AND ')}` : Prisma.sql``;
+}
+
+/**
+ * The single source behind every GST report: one row per tax line, with the
+ * sign already applied — invoices positive, credit notes NEGATIVE — so every
+ * caller can simply SUM the rows and read NET output tax for the window.
+ *
+ * A credit note is included when its OWN date falls in the window (that is
+ * when it reduces the liability), but only while its parent invoice is still
+ * live — a cancelled invoice takes both its lines and its credits out of the
+ * books together. `is_invoice` / `is_credit` / `doc_id` let the caller count
+ * documents, not just rupees (counts must stay unsigned, so those columns
+ * remain 0/1 flags).
+ */
+function gstSource(from, to) {
+  return Prisma.sql`
+    SELECT
+      ii.tax_rate, i.tax_type, ii.hsn_code,
+      ii.taxable_value, ii.cgst_amount, ii.sgst_amount, ii.igst_amount,
+      i.snapshot_gstin AS gstin, i.snapshot_name AS customer_name,
+      i.id AS doc_id, 1 AS is_invoice, 0 AS is_credit
+    FROM invoice_items ii
+    INNER JOIN invoices i ON i.id = ii.invoice_id
+    WHERE ${LIVE} ${rangeFilter(from, to)}
+    UNION ALL
+    SELECT
+      cni.tax_rate, cn.tax_type, cni.hsn_code,
+      -cni.taxable_value, -cni.cgst_amount, -cni.sgst_amount, -cni.igst_amount,
+      cn.snapshot_gstin, cn.snapshot_name,
+      cn.id, 0, 1
+    FROM credit_note_items cni
+    INNER JOIN credit_notes cn ON cn.id = cni.credit_note_id
+    INNER JOIN invoices i ON i.id = cn.invoice_id
+    WHERE cn.deleted_at IS NULL AND ${LIVE} ${creditRangeFilter(from, to)}
+  `;
+}
+
 export const reportRepo = {
   /** Headline numbers for a window, plus the immediately preceding window. */
   async salesSummary({ from, to } = {}, db = prisma) {
@@ -289,6 +332,100 @@ export const reportRepo = {
       units: Number(r.units),
       costValue: asMoney(r.cost_value),
       retailValue: asMoney(r.retail_value),
+    }));
+  },
+
+  // -------------------------------------------------------------------------
+  // GST reports (read off the ITEM-level tax columns, net of credit notes)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rate-wise output tax: for every slab, the taxable value and the
+   * CGST/SGST/IGST actually charged, split by intra-/inter-state supply.
+   * Credit notes in the window subtract, so the figure is what is owed.
+   */
+  async gstSummary({ from, to } = {}, db = prisma) {
+    const rows = await db.$queryRaw(Prisma.sql`
+      SELECT
+        src.tax_rate, src.tax_type,
+        COALESCE(SUM(src.taxable_value), 0) AS taxable_value,
+        COALESCE(SUM(src.cgst_amount), 0)   AS cgst_amount,
+        COALESCE(SUM(src.sgst_amount), 0)   AS sgst_amount,
+        COALESCE(SUM(src.igst_amount), 0)   AS igst_amount
+      FROM (${gstSource(from, to)}) src
+      GROUP BY src.tax_rate, src.tax_type
+      ORDER BY src.tax_rate ASC
+    `);
+    return rows.map((r) => ({
+      rate: Number(r.tax_rate),
+      taxType: r.tax_type,
+      taxableValue: asMoney(r.taxable_value),
+      cgstAmount: asMoney(r.cgst_amount),
+      sgstAmount: asMoney(r.sgst_amount),
+      igstAmount: asMoney(r.igst_amount),
+      taxAmount: asMoney(
+        Number(r.cgst_amount) + Number(r.sgst_amount) + Number(r.igst_amount)
+      ),
+    }));
+  },
+
+  /** HSN-wise taxable value and tax, per slab (GSTR-1 style HSN summary). */
+  async gstHsnSummary({ from, to } = {}, db = prisma) {
+    const rows = await db.$queryRaw(Prisma.sql`
+      SELECT
+        src.hsn_code, src.tax_rate,
+        COALESCE(SUM(src.taxable_value), 0) AS taxable_value,
+        COALESCE(SUM(src.cgst_amount), 0)   AS cgst_amount,
+        COALESCE(SUM(src.sgst_amount), 0)   AS sgst_amount,
+        COALESCE(SUM(src.igst_amount), 0)   AS igst_amount
+      FROM (${gstSource(from, to)}) src
+      GROUP BY src.hsn_code, src.tax_rate
+      ORDER BY src.hsn_code ASC, src.tax_rate ASC
+    `);
+    return rows.map((r) => ({
+      hsnCode: r.hsn_code ?? null,
+      rate: Number(r.tax_rate),
+      taxableValue: asMoney(r.taxable_value),
+      cgstAmount: asMoney(r.cgst_amount),
+      sgstAmount: asMoney(r.sgst_amount),
+      igstAmount: asMoney(r.igst_amount),
+      taxAmount: asMoney(
+        Number(r.cgst_amount) + Number(r.sgst_amount) + Number(r.igst_amount)
+      ),
+    }));
+  },
+
+  /**
+   * GSTIN-wise output tax (B2B): what each registered buyer was charged, net
+   * of their returns. NULL GSTIN buckets as unregistered (B2C) supply.
+   */
+  async gstCustomerSummary({ from, to } = {}, db = prisma) {
+    const rows = await db.$queryRaw(Prisma.sql`
+      SELECT
+        src.gstin,
+        MAX(src.customer_name) AS customer_name,
+        COALESCE(SUM(src.taxable_value), 0) AS taxable_value,
+        COALESCE(SUM(src.cgst_amount), 0)   AS cgst_amount,
+        COALESCE(SUM(src.sgst_amount), 0)   AS sgst_amount,
+        COALESCE(SUM(src.igst_amount), 0)   AS igst_amount,
+        COUNT(DISTINCT CASE WHEN src.is_invoice = 1 THEN src.doc_id END) AS invoices,
+        COUNT(DISTINCT CASE WHEN src.is_credit = 1 THEN src.doc_id END)  AS credit_notes
+      FROM (${gstSource(from, to)}) src
+      GROUP BY src.gstin
+      ORDER BY taxable_value DESC
+    `);
+    return rows.map((r) => ({
+      gstin: r.gstin ?? null,
+      name: r.customer_name ?? null,
+      invoices: Number(r.invoices),
+      creditNotes: Number(r.credit_notes),
+      taxableValue: asMoney(r.taxable_value),
+      cgstAmount: asMoney(r.cgst_amount),
+      sgstAmount: asMoney(r.sgst_amount),
+      igstAmount: asMoney(r.igst_amount),
+      taxAmount: asMoney(
+        Number(r.cgst_amount) + Number(r.sgst_amount) + Number(r.igst_amount)
+      ),
     }));
   },
 };

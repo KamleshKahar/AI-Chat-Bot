@@ -107,6 +107,25 @@ function ReportsPageInner() {
   });
   const aging = useServerResource({ path: '/reports/receivables-aging', refreshKey: revision });
 
+  // GST returns read off the same window as every other report. All three are
+  // net of credit notes already (the server's source unions invoices minus
+  // returns), so the figures are what is actually owed for the period.
+  const gstSummary = useServerResource({
+    path: '/reports/gst-summary',
+    query: debouncedRange,
+    refreshKey: revision,
+  });
+  const gstHsn = useServerResource({
+    path: '/reports/gst-hsn',
+    query: debouncedRange,
+    refreshKey: revision,
+  });
+  const gstCustomers = useServerResource({
+    path: '/reports/gst-customers',
+    query: debouncedRange,
+    refreshKey: revision,
+  });
+
   /*
     The sales register is a real paginated list, not an aggregate — the report
     endpoints deliberately do not return thousands of individual rows. Page 1 is
@@ -169,6 +188,7 @@ function ReportsPageInner() {
     { key: 'products', label: 'Product Performance', icon: Package },
     { key: 'inventory', label: 'Inventory', icon: Layers },
     { key: 'customers', label: 'Customers', icon: Users },
+    { key: 'gst', label: 'GST', icon: Percent },
   ];
 
   const AGING_LABELS = {
@@ -755,6 +775,224 @@ function ReportsPageInner() {
               </table>
             </div>
           </Card>
+        </div>
+      )}
+
+      {/* GST TAB */}
+      {activeTab === 'gst' && (
+        <div className="space-y-6">
+          {/*
+            Three views of the same source: rate-wise (what the return says per
+            slab), HSN-wise (the GSTR-1 style summary) and GSTIN-wise (B2B
+            buyers, net of their returns). Every figure is server-computed and
+            already subtracts credit notes issued in the window.
+          */}
+          <Card
+            title="Rate-wise Output Tax"
+            description="Taxable value and tax per GST slab for the selected period"
+            padded={false}
+          >
+            {(gstSummary.data?.rates ?? []).length === 0 ? (
+              <div className="p-4">
+                <EmptyState
+                  icon={Percent}
+                  title="No taxable sales in this period"
+                  description="Adjust the date range or record a sale to populate the GST summary."
+                />
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs min-w-[640px]">
+                  <thead className="bg-slate-50 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                    <tr>
+                      <th className="px-4 py-3">GST Rate</th>
+                      <th className="px-4 py-3">Supply Type</th>
+                      <th className="px-4 py-3 text-right">Taxable Value</th>
+                      <th className="px-4 py-3 text-right">CGST</th>
+                      <th className="px-4 py-3 text-right">SGST</th>
+                      <th className="px-4 py-3 text-right">IGST</th>
+                      <th className="px-4 py-3 text-right">Total Tax</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {gstSummary.data.rates.map((row) => (
+                      <tr
+                        key={`${row.rate}-${row.taxType}`}
+                        className="hover:bg-slate-50/60"
+                      >
+                        <td className="px-4 py-3 font-bold text-slate-900">{row.rate}%</td>
+                        <td className="px-4 py-3 text-slate-600">
+                          {row.taxType === 'IGST' ? 'Inter-state' : 'Intra-state'}
+                        </td>
+                        <td className="px-4 py-3 text-right font-semibold text-slate-800">
+                          {formatCurrency(row.taxableValue)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-slate-600">
+                          {formatCurrency(row.cgstAmount)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-slate-600">
+                          {formatCurrency(row.sgstAmount)}
+                        </td>
+                        <td className="px-4 py-3 text-right text-slate-600">
+                          {formatCurrency(row.igstAmount)}
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold text-slate-900">
+                          {formatCurrency(row.taxAmount)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot className="bg-slate-50 font-semibold">
+                    <tr>
+                      <td className="px-4 py-3 text-slate-800" colSpan={2}>
+                        Total
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-slate-900">
+                        {formatCurrency(gstSummary.data.totals.taxableValue)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-slate-900">
+                        {formatCurrency(gstSummary.data.totals.cgstAmount)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-slate-900">
+                        {formatCurrency(gstSummary.data.totals.sgstAmount)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-slate-900">
+                        {formatCurrency(gstSummary.data.totals.igstAmount)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold text-slate-900">
+                        {formatCurrency(gstSummary.data.totals.taxAmount)}
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            )}
+          </Card>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+            <Card title="HSN-wise Summary" description="Taxable value per HSN code and slab" padded={false}>
+              {(gstHsn.data?.hsn ?? []).length === 0 ? (
+                <div className="p-4">
+                  <EmptyState
+                    icon={Layers}
+                    title="No HSN data"
+                    description="Products with an HSN code sold in this period will appear here."
+                  />
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs min-w-[420px]">
+                    <thead className="bg-slate-50 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">HSN</th>
+                        <th className="px-4 py-3 text-center">Rate</th>
+                        <th className="px-4 py-3 text-right">Taxable Value</th>
+                        <th className="px-4 py-3 text-right">Tax</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {gstHsn.data.hsn.map((row, i) => (
+                        <tr key={`${row.hsnCode ?? 'na'}-${row.rate}-${i}`} className="hover:bg-slate-50/60">
+                          <td className="px-4 py-3 font-mono font-semibold text-slate-800">
+                            {row.hsnCode || '—'}
+                          </td>
+                          <td className="px-4 py-3 text-center text-slate-600">{row.rate}%</td>
+                          <td className="px-4 py-3 text-right font-semibold text-slate-800">
+                            {formatCurrency(row.taxableValue)}
+                          </td>
+                          <td className="px-4 py-3 text-right font-bold text-slate-900">
+                            {formatCurrency(row.taxAmount)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-slate-50 font-semibold">
+                      <tr>
+                        <td className="px-4 py-3 text-slate-800" colSpan={2}>
+                          Total
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold text-slate-900">
+                          {formatCurrency(gstHsn.data.totals.taxableValue)}
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold text-slate-900">
+                          {formatCurrency(gstHsn.data.totals.taxAmount)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+            </Card>
+
+            <Card title="GSTIN-wise (B2B)" description="What each registered buyer was charged, net of returns" padded={false}>
+              {(gstCustomers.data?.customers ?? []).length === 0 ? (
+                <div className="p-4">
+                  <EmptyState
+                    icon={Users}
+                    title="No B2B supply"
+                    description="Sales to GSTIN-registered customers in this period will appear here."
+                  />
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs min-w-[480px]">
+                    <thead className="bg-slate-50 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">Customer</th>
+                        <th className="px-4 py-3 text-center">Docs</th>
+                        <th className="px-4 py-3 text-right">Taxable Value</th>
+                        <th className="px-4 py-3 text-right">Tax</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {gstCustomers.data.customers.map((row, i) => (
+                        <tr key={`${row.gstin ?? 'b2c'}-${i}`} className="hover:bg-slate-50/60">
+                          <td className="px-4 py-3">
+                            <p className="font-semibold text-slate-800 truncate">
+                              {row.name || 'Unregistered'}
+                            </p>
+                            <p className="text-[11px] text-slate-400 font-mono">
+                              {row.gstin || 'B2C'}
+                            </p>
+                          </td>
+                          <td className="px-4 py-3 text-center text-slate-600">
+                            {row.invoices}
+                            {row.creditNotes > 0 && (
+                              <span className="text-rose-500"> ({row.creditNotes} CR)</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-right font-semibold text-slate-800">
+                            {formatCurrency(row.taxableValue)}
+                          </td>
+                          <td className="px-4 py-3 text-right font-bold text-slate-900">
+                            {formatCurrency(row.taxAmount)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-slate-50 font-semibold">
+                      <tr>
+                        <td className="px-4 py-3 text-slate-800">
+                          Total ({gstCustomers.data.totals.invoices} invoices
+                          {gstCustomers.data.totals.creditNotes > 0
+                            ? `, ${gstCustomers.data.totals.creditNotes} credit notes`
+                            : ''}
+                          )
+                        </td>
+                        <td />
+                        <td className="px-4 py-3 text-right font-bold text-slate-900">
+                          {formatCurrency(gstCustomers.data.totals.taxableValue)}
+                        </td>
+                        <td className="px-4 py-3 text-right font-bold text-slate-900">
+                          {formatCurrency(gstCustomers.data.totals.taxAmount)}
+                        </td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+              )}
+            </Card>
+          </div>
         </div>
       )}
     </div>

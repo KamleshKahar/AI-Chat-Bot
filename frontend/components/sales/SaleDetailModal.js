@@ -16,6 +16,16 @@ import { formatCurrency, formatDate } from '@/lib/formatters';
 export function SaleDetailModal({ sale, onClose, onViewInvoice }) {
   if (!sale) return null;
 
+  // Distinct GST slabs across the lines — an invoice may mix them, so the
+  // totals row only prints a percentage when there is a single one.
+  const distinctRates = [
+    ...new Set((sale.items ?? []).map((item) => Number(item.taxRate ?? sale.taxRate ?? 0))),
+  ].sort((a, b) => a - b);
+  const gstLabel =
+    distinctRates.length === 1
+      ? `GST (${distinctRates[0]}%)`
+      : `GST (${distinctRates.join('%, ')}%)`;
+
   return (
     <Modal
       isOpen={!!sale}
@@ -89,6 +99,7 @@ export function SaleDetailModal({ sale, onClose, onViewInvoice }) {
                 <th className="px-3 py-2.5">Product</th>
                 <th className="px-3 py-2.5 text-center">Qty</th>
                 <th className="px-3 py-2.5 text-right">Unit Price</th>
+                <th className="px-3 py-2.5 text-right">GST %</th>
                 <th className="px-3 py-2.5 text-right">Amount</th>
               </tr>
             </thead>
@@ -104,6 +115,9 @@ export function SaleDetailModal({ sale, onClose, onViewInvoice }) {
                   </td>
                   <td className="px-3 py-2.5 text-right text-slate-600">
                     {formatCurrency(item.unitPrice)}
+                  </td>
+                  <td className="px-3 py-2.5 text-right text-slate-600">
+                    {Number(item.taxRate ?? sale.taxRate ?? 0)}%
                   </td>
                   <td className="px-3 py-2.5 text-right font-bold text-slate-900">
                     {formatCurrency(item.subtotal)}
@@ -131,7 +145,7 @@ export function SaleDetailModal({ sale, onClose, onViewInvoice }) {
             </div>
           )}
           <div className="flex justify-between text-slate-600">
-            <span>GST ({sale.taxRate}%)</span>
+            <span>{gstLabel}</span>
             <span className="font-semibold text-slate-900">{formatCurrency(sale.taxAmount)}</span>
           </div>
           <div className="flex justify-between items-baseline pt-2 border-t border-slate-200">
@@ -140,10 +154,23 @@ export function SaleDetailModal({ sale, onClose, onViewInvoice }) {
               {formatCurrency(sale.grandTotal)}
             </span>
           </div>
+          {Number(sale.creditedAmount ?? 0) > 0 && (
+            <div className="flex justify-between text-rose-600">
+              <span>Credited (credit notes)</span>
+              <span className="font-semibold">− {formatCurrency(sale.creditedAmount)}</span>
+            </div>
+          )}
           <div className="flex justify-between text-amber-600">
             <span>Balance Due</span>
             <span className="font-semibold">
-              {formatCurrency(Math.max(0, Number(sale.grandTotal) - Number(sale.paidAmount)))}
+              {formatCurrency(
+                Math.max(
+                  0,
+                  Number(sale.grandTotal) -
+                    Number(sale.paidAmount) -
+                    Number(sale.creditedAmount ?? 0)
+                )
+              )}
             </span>
           </div>
         </div>

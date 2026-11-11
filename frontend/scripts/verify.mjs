@@ -2,8 +2,10 @@
 // Run with: node --experimental-strip-types scripts/verify.js  (or just read the output)
 import {
   calculateSaleTotals,
+  computeCreditNoteTotals,
   resolvePaymentStatus,
   round2,
+  allocate,
   filterByDateRange,
 } from '../lib/salesLogic.js';
 
@@ -120,6 +122,145 @@ check(
   'inclusive date range',
   filterByDateRange(sampleSales, '2026-09-28', '2026-10-01').map((s) => s.id),
   ['a', 'b']
+);
+
+// 8. Per-line GST slabs (mixed-rate invoice)
+//    0% on 200 + 28% on 1000 = 280 tax; the invoice-level 18% fallback
+//    must NOT leak onto either line. Mirrors backend billing.test.js.
+check(
+  'mixed slabs taxed per line',
+  (() => {
+    const t = calculateSaleTotals({
+      items: [
+        { quantity: 2, unitPrice: 100, taxRate: 0 },
+        { quantity: 1, unitPrice: 1000, taxRate: 28 },
+      ],
+      taxRate: 18,
+    });
+    return {
+      lineRates: t.lineItems.map((l) => l.taxRate),
+      taxAmount: t.taxAmount,
+      grandTotal: t.grandTotal,
+    };
+  })(),
+  { lineRates: [0, 28], taxAmount: 280, grandTotal: 1480 }
+);
+
+// 9. Lines without their own rate take the invoice-level fallback
+check(
+  'fallback rate applies only where no line rate is set',
+  (() => {
+    const t = calculateSaleTotals({
+      items: [
+        { quantity: 1, unitPrice: 1000 },
+        { quantity: 1, unitPrice: 1000, taxRate: 5 },
+      ],
+      taxRate: 12,
+    });
+    return { lineRates: t.lineItems.map((l) => l.taxRate), taxAmount: t.taxAmount };
+  })(),
+  { lineRates: [12, 5], taxAmount: 170 }
+);
+
+// 10. Discount shares always sum back to the invoice discount (largest-remainder)
+check(
+  'discount allocation sums exactly',
+  (() => {
+    const t = calculateSaleTotals({
+      items: [
+        { quantity: 1, unitPrice: 333.33 },
+        { quantity: 1, unitPrice: 333.33 },
+        { quantity: 1, unitPrice: 333.34 },
+      ],
+      discountType: 'percent',
+      discountValue: 10,
+      taxRate: 18,
+    });
+    const shares = round2(t.lineItems.reduce((acc, l) => acc + l.discountAmount, 0));
+    return { shares, invoice: t.discountAmount, taxable: t.taxableAmount };
+  })(),
+  { shares: 100, invoice: 100, taxable: 900 }
+);
+
+check(
+  'allocate distributes leftover paise to the largest fractions',
+  allocate(100, [333.33, 333.33, 333.34]),
+  [33.33, 33.33, 33.34]
+);
+
+// 11. Credit-note preview: a FULL credit reproduces the invoice figures
+//     (minus shipping — a return does not re-charge freight).
+check(
+  'full credit note reproduces the invoice',
+  (() => {
+    const invoice = calculateSaleTotals({
+      items: [
+        { quantity: 4, unitPrice: 3850, taxRate: 18 },
+        { quantity: 2, unitPrice: 1950, taxRate: 12 },
+      ],
+      discountType: 'percent',
+      discountValue: 5,
+      taxRate: 18,
+      shippingCharges: 100,
+    });
+    const credit = computeCreditNoteTotals({
+      items: invoice.lineItems.map((l) => ({
+        ...l,
+        quantity: l.quantity,
+        creditedQuantity: l.quantity,
+      })),
+      taxType: 'CGST_SGST',
+    });
+    return {
+      subtotal: credit.subtotal,
+      discountAmount: credit.discountAmount,
+      taxableAmount: credit.taxableAmount,
+      taxAmount: credit.taxAmount,
+      grandTotal: credit.grandTotal,
+      matchesInvoice: credit.taxAmount === invoice.taxAmount,
+    };
+  })(),
+  {
+    subtotal: 19300,
+    discountAmount: 965,
+    taxableAmount: 18335,
+    taxAmount: 3078, // 18% of 14630 + 12% of 3705
+    grandTotal: 21413, // invoice grand total 21513.00 less 100 shipping
+    matchesInvoice: true,
+  }
+);
+
+// 12. Partial credit scales the line's discount share proportionally
+check(
+  'partial credit scales proportionally',
+  (() => {
+    const c = computeCreditNoteTotals({
+      items: [
+        {
+          quantity: 4,
+          unitPrice: 3850,
+          discountAmount: 770,
+          taxRate: 18,
+          creditedQuantity: 1,
+        },
+      ],
+    });
+    const line = c.lines[0];
+    return {
+      lineAmount: line.lineAmount,
+      discountAmount: line.discountAmount,
+      taxableValue: line.taxableValue,
+      taxAmount: line.lineTax,
+      grandTotal: c.grandTotal,
+    };
+  })(),
+  {
+    lineAmount: 3850,
+    discountAmount: 192.5,
+    taxableValue: 3657.5,
+    taxAmount: 658.35,
+    grandTotal: 4315.85,
+  }
 );
 
 console.log(failures === 0 ? '\nAll checks passed.' : `\n${failures} check(s) failed.`);

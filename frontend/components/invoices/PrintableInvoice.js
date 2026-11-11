@@ -3,56 +3,8 @@
 import React from 'react';
 import { useData } from '@/context/DataContext';
 import { formatCurrency, formatDate } from '@/lib/formatters';
-
-const numberToWords = (num) => {
-  const ONES = ['', 'One', 'Two', 'Three', 'Four', 'Five', 'Six', 'Seven', 'Eight', 'Nine',
-  'Ten', 'Eleven', 'Twelve', 'Thirteen', 'Fourteen', 'Fifteen', 'Sixteen', 'Seventeen', 'Eighteen', 'Nineteen'];
-const TENS = ['', '', 'Twenty', 'Thirty', 'Forty', 'Fifty', 'Sixty', 'Seventy', 'Eighty', 'Ninety'];
-
-const twoDigits = (n) => (n < 20 ? ONES[n] : `${TENS[Math.floor(n / 10)]}${n % 10 ? ` ${ONES[n % 10]}` : ''}`);
-
-const threeDigits = (n) => {
-  const hundred = Math.floor(n / 100);
-  const rest = n % 100;
-  return `${hundred ? `${ONES[hundred]} Hundred` : ''}${hundred && rest ? ' ' : ''}${twoDigits(rest)}`;
-};
-
-function convertToWords(value) {
-  const num = Math.floor(Math.abs(Number(value) || 0));
-  if (num === 0) return 'Zero';
-
-  const crore = Math.floor(num / 10000000);
-  const lakh = Math.floor((num % 10000000) / 100000);
-  const thousand = Math.floor((num % 100000) / 1000);
-  const remainder = num % 1000;
-
-  const parts = [];
-  if (crore) parts.push(`${convertInteger(crore)} Crore`);
-  if (lakh) parts.push(`${convertInteger(lakh)} Lakh`);
-  if (thousand) parts.push(`${convertInteger(thousand)} Thousand`);
-  if (remainder) parts.push(threeDigits(remainder));
-
-  return parts.join(' ').trim();
-}
-
-function convertInteger(n) {
-  if (n < 100) return twoDigits(n);
-  if (n < 1000) return threeDigits(n);
-  return String(n);
-}
-
-function numberToWords(value) {
-  const num = Math.abs(Number(value) || 0);
-  const whole = Math.floor(num);
-  const paise = Math.round((num - whole) * 100);
-
-  let words = '';
-  if (whole > 0) words = `${convertToWords(whole)} Rupees`;
-  if (paise > 0) words += `${words ? ' and ' : ''}${convertToWords(paise)} Paise`;
-
-  return words || 'Zero Rupees Only';
-}
-};
+import { round2 } from '@/lib/salesLogic';
+import { numberToWords } from '@/lib/numberToWords';
 
 export function PrintableInvoice({ invoice }) {
   const { company } = useData();
@@ -73,6 +25,20 @@ export function PrintableInvoice({ invoice }) {
   const cgstAmount = Number(invoice.cgstAmount ?? 0);
   const sgstAmount = Number(invoice.sgstAmount ?? 0);
   const igstAmount = Number(invoice.igstAmount ?? 0);
+
+  /*
+    * Per-line GST slabs. Each line carries its own `taxRate` and its own
+    * discounted `taxableValue` (an invoice may mix 12% and 18%), so the rate
+    * shown under each line is that line's slab and the totals' percentage
+    * labels are only printed when every line shares one rate.
+    */
+  const itemRate = (item) => Number(item.taxRate ?? invoice.taxRate ?? 0);
+  const itemTaxable = (item) => Number(item.taxableValue ?? item.subtotal ?? 0);
+  const distinctRates = [
+    ...new Set((invoice.items ?? []).map((item) => itemRate(item))),
+  ].sort((a, b) => a - b);
+  const rateLabel =
+    distinctRates.length === 1 ? ` (${distinctRates[0]}%)` : ' (mixed)';
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm print:border-0 print:shadow-none print:rounded-none">
@@ -220,6 +186,9 @@ export function PrintableInvoice({ invoice }) {
               <th className="py-2 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-600">
                 Item Description
               </th>
+              <th className="py-2 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-600 w-16 text-center">
+                HSN
+              </th>
               <th className="py-2 px-2 text-[10px] font-bold uppercase tracking-wider text-slate-600 w-20 text-center">
                 Qty
               </th>
@@ -239,8 +208,15 @@ export function PrintableInvoice({ invoice }) {
           </thead>
           <tbody>
             {invoice.items.map((item, index) => {
-              const taxAmount = (Number(item.subtotal) * Number(invoice.taxRate || 0)) / 100;
-              const taxable = Number(item.subtotal);
+              /*
+                * Tax is per line: the line's own slab applied to its own
+                * discounted (taxable) value. `item.taxableValue` is what the
+                * server persisted; `item.subtotal` is the pre-discount fallback
+                * for older payloads.
+                */
+              const taxable = itemTaxable(item);
+              const rate = itemRate(item);
+              const lineTax = round2((taxable * rate) / 100);
 
               return (
                 <tr key={`${item.productId}-${index}`} className="border-b border-slate-200">
@@ -248,6 +224,9 @@ export function PrintableInvoice({ invoice }) {
                   <td className="py-2.5 px-2 align-top">
                     <p className="font-semibold text-slate-900">{item.productName}</p>
                     <p className="text-[10px] text-slate-500 font-mono">SKU: {item.sku}</p>
+                  </td>
+                  <td className="py-2.5 px-2 text-center text-slate-600 font-mono align-top">
+                    {item.hsnCode || '—'}
                   </td>
                   <td className="py-2.5 px-2 text-center text-slate-800 font-medium align-top">
                     {item.quantity}
@@ -259,11 +238,11 @@ export function PrintableInvoice({ invoice }) {
                     {formatCurrency(taxable)}
                   </td>
                   <td className="py-2.5 px-2 text-right text-slate-600 align-top">
-                    {formatCurrency(taxAmount)}
-                    <span className="block text-[9px] text-slate-400">@ {invoice.taxRate}%</span>
+                    {formatCurrency(lineTax)}
+                    <span className="block text-[9px] text-slate-400">@ {rate}%</span>
                   </td>
                   <td className="py-2.5 pl-2 text-right font-bold text-slate-900 align-top">
-                    {formatCurrency(Number(item.subtotal) + taxAmount)}
+                    {formatCurrency(taxable + lineTax)}
                   </td>
                 </tr>
               );
@@ -334,7 +313,7 @@ export function PrintableInvoice({ invoice }) {
             */}
             {isInterState ? (
               <div className="flex justify-between text-slate-600">
-                <span>IGST ({invoice.taxRate}%)</span>
+                <span>IGST{rateLabel}</span>
                 <span className="font-semibold text-slate-900">
                   {formatCurrency(igstAmount)}
                 </span>
@@ -342,14 +321,20 @@ export function PrintableInvoice({ invoice }) {
             ) : (
               <>
                 <div className="flex justify-between text-slate-600">
-                  <span>CGST ({invoice.taxRate / 2}%)</span>
+                  <span>
+                    CGST
+                    {distinctRates.length === 1 ? ` (${distinctRates[0] / 2}%)` : ''}
+                  </span>
                   <span className="font-semibold text-slate-900">
                     {formatCurrency(cgstAmount)}
                   </span>
                 </div>
 
                 <div className="flex justify-between text-slate-600">
-                  <span>SGST ({invoice.taxRate / 2}%)</span>
+                  <span>
+                    SGST
+                    {distinctRates.length === 1 ? ` (${distinctRates[0] / 2}%)` : ''}
+                  </span>
                   <span className="font-semibold text-slate-900">
                     {formatCurrency(sgstAmount)}
                   </span>

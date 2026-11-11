@@ -15,6 +15,7 @@ import {
   ChevronRight,
   Layers,
   Sparkles,
+  RotateCcw,
 } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 
@@ -33,6 +34,7 @@ const NAV_ITEMS = [
   { name: 'Customers', href: '/customers', icon: Users },
   { name: 'Sales & POS', href: '/sales', icon: ShoppingCart },
   { name: 'Invoices', href: '/invoices', icon: FileText },
+  { name: 'Credit Notes', href: '/credit-notes', icon: RotateCcw, permission: 'creditNote:read' },
   { name: 'Reports', href: '/reports', icon: BarChart3, permission: 'report:read' },
   { name: 'Users', href: '/users', icon: UserCog, permission: 'user:read' },
   { name: 'AI Assistant', href: '/chat', icon: Sparkles },

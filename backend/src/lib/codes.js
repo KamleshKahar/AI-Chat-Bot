@@ -3,7 +3,7 @@
  *
  * The database uses BIGINT surrogate primary keys, but every identifier the
  * user actually sees is a code: PRD-101, CUST-001, CAT-01, SALE-1001,
- * INV-2026-009, PAY-0001, TXN-901. Codes are allocated from the
+ * INV-2026-009, CRN-2026-001, PAY-0001, TXN-901. Codes are allocated from the
  * `document_sequences` table using SELECT ... FOR UPDATE so two concurrent
  * transactions can never be handed the same number.
  */
@@ -21,6 +21,17 @@ export const SEQ = {
 export function invoiceSequence(year) {
   return { prefix: 'INV', period: String(year), pad: 3, start: 1 };
 }
+
+/** Credit notes follow the same yearly pattern: CRN-2026-001. */
+export function creditNoteSequence(year) {
+  return { prefix: 'CRN', period: String(year), pad: 3, start: 1 };
+}
+
+/**
+ * Prefixes whose code embeds the allocation year: `INV-2026-009`. Everything
+ * else is a single lifetime counter (`PRD-101`).
+ */
+const YEAR_EMBEDDED_PREFIXES = new Set(['INV', 'CRN']);
 
 function pad(n, width) {
   return String(n).padStart(width, '0');
@@ -60,7 +71,7 @@ export async function nextCode(tx, spec) {
     data: { lastNumber: next },
   });
 
-  // Invoice codes embed the year, everything else does not.
-  if (prefix === 'INV') return `${prefix}-${period}-${pad(next, width)}`;
+  // Invoice and credit-note codes embed the year, everything else does not.
+  if (YEAR_EMBEDDED_PREFIXES.has(prefix)) return `${prefix}-${period}-${pad(next, width)}`;
   return `${prefix}${pad(next, width)}`;
 }

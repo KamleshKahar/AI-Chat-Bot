@@ -217,6 +217,9 @@ function invoiceBase(row) {
     shippingCharges: asMoney(row.shipping_charges ?? row.shippingCharges ?? 0),
     grandTotal: asMoney(grandTotal),
     paidAmount: asMoney(paidAmount),
+    // Value already credited back by credit notes; balanceDue below is
+    // grandTotal - paidAmount - creditedAmount, as stored.
+    creditedAmount: asMoney(row.credited_amount ?? row.creditedAmount ?? 0),
     balanceDue: asMoney(balanceDue),
     paymentStatus: toPaymentStatusLabel(row.payment_status ?? row.paymentStatus, {
       dueDate,
@@ -297,6 +300,7 @@ export function serializeInvoice(row) {
     shippingCharges: base.shippingCharges,
     grandTotal: base.grandTotal,
     paidAmount: base.paidAmount,
+    creditedAmount: base.creditedAmount,
     balanceDue: base.balanceDue,
     paymentStatus: base.paymentStatus,
     paymentMethod: base.paymentMethod,
@@ -316,6 +320,43 @@ export function serializePayment(row) {
     reference: row.reference ?? null,
     paidAt: row.paidAt ?? row.paid_at ?? null,
     notes: row.notes ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Credit notes
+// ---------------------------------------------------------------------------
+
+/**
+ * Credit-note projection. `id` is the CRN code (same convention as invoices),
+ * `invoiceId` points back at the invoice it credits, and line items reuse the
+ * invoice item shape — a credit note is the same legal document run backwards.
+ */
+export function serializeCreditNote(row) {
+  return {
+    id: row.credit_note_number ?? row.creditNoteNumber ?? row.id,
+    invoiceId: row.invoice_number ?? row.invoiceNumber ?? row.invoice?.invoiceNumber ?? null,
+    date: toDateOnly(row.credit_date ?? row.creditDate),
+    reason: row.reason ?? null,
+    customer: {
+      id: row.customer_code ?? row.customerCode ?? row.customer?.code ?? null,
+      name: row.snapshot_name ?? row.snapshotName ?? null,
+      company: row.snapshot_company ?? row.snapshotCompany ?? null,
+      gstin: row.snapshot_gstin ?? row.snapshotGstin ?? null,
+      state: row.snapshot_state ?? row.snapshotState ?? null,
+    },
+    items: (row.items ?? []).map(serializeItem),
+    subtotal: asMoney(row.subtotal),
+    discountAmount: asMoney(row.discount_amount ?? row.discountAmount ?? 0),
+    taxableAmount: asMoney(row.taxable_amount ?? row.taxableAmount ?? 0),
+    taxType: row.tax_type ?? row.taxType ?? 'CGST_SGST',
+    taxRate: asNum(row.tax_rate ?? row.taxRate ?? 0),
+    cgstAmount: asMoney(row.cgst_amount ?? row.cgstAmount ?? 0),
+    sgstAmount: asMoney(row.sgst_amount ?? row.sgstAmount ?? 0),
+    igstAmount: asMoney(row.igst_amount ?? row.igstAmount ?? 0),
+    taxAmount: asMoney(row.tax_amount ?? row.taxAmount ?? 0),
+    grandTotal: asMoney(row.grand_total ?? row.grandTotal ?? 0),
+    createdAt: row.created_at ?? row.createdAt ?? null,
   };
 }
 

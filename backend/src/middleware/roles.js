@@ -37,6 +37,9 @@ export const PERMISSIONS = {
   INVOICE_READ: 'invoice:read',
   INVOICE_PAY: 'invoice:pay',
 
+  CREDIT_NOTE_READ: 'creditNote:read',
+  CREDIT_NOTE_CREATE: 'creditNote:create',
+
   REPORT_READ: 'report:read',
   LEDGER_READ: 'ledger:read',
   DASHBOARD_READ: 'dashboard:read',
@@ -49,6 +52,10 @@ const READ_ONLY = [
   PERMISSIONS.CUSTOMER_READ,
   PERMISSIONS.SALE_READ,
   PERMISSIONS.INVOICE_READ,
+  // Everyone who can see an invoice can see the credit notes raised against
+  // it — reading a return document is not a money-moving power. *Creating*
+  // one is, and stays with ADMIN and MANAGER below.
+  PERMISSIONS.CREDIT_NOTE_READ,
   PERMISSIONS.LEDGER_READ,
   PERMISSIONS.DASHBOARD_READ,
   // `report:read` is deliberately *not* in READ_ONLY: financial reporting is
@@ -73,6 +80,9 @@ export const ROLE_PERMISSIONS = {
     PERMISSIONS.CUSTOMER_WRITE,
     PERMISSIONS.SALE_CREATE,
     PERMISSIONS.INVOICE_PAY,
+    // Credit notes reverse invoiced money and restock inventory — a manager's
+    // call, never a cashier's.
+    PERMISSIONS.CREDIT_NOTE_CREATE,
   ],
 
   // A cashier rings up sales and moves stock, but has no authority over money

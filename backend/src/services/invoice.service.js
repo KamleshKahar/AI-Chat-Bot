@@ -4,7 +4,7 @@ import { auditRepo } from '../repositories/audit.repo.js';
 import { invoiceRepo } from '../repositories/invoice.repo.js';
 import { paymentRepo } from '../repositories/payment.repo.js';
 import { SEQ, nextCode } from '../lib/codes.js';
-import { computeBalanceDue, resolvePaymentStatusEnum } from '../lib/billing.js';
+import { resolveSettlementState } from '../lib/billing.js';
 import { d, money } from '../lib/decimal.js';
 import { toPaymentMethodEnum } from '../lib/enums.js';
 import {
@@ -53,14 +53,21 @@ export const invoiceService = {
     return prisma.$transaction(async (tx) => {
       // Lock the invoice.
       const rows = await tx.$queryRawUnsafe(
-        'SELECT id, grand_total, paid_amount, balance_due, invoice_number, customer_id FROM invoices WHERE id = ? FOR UPDATE',
+        'SELECT id, grand_total, paid_amount, credited_amount, balance_due, invoice_number, customer_id FROM invoices WHERE id = ? FOR UPDATE',
         existing.id
       );
       if (!rows.length) throw AppError.notFound('Invoice not found');
 
       const grandTotal = money(rows[0].grand_total);
       const paidAmount = money(rows[0].paid_amount);
-      const balanceDue = computeBalanceDue(grandTotal, paidAmount);
+      // Credit notes already extinguish part of the receivable — the payable
+      // balance is grandTotal - paid - credited (see #resolveSettlementState).
+      const creditedAmount = money(rows[0].credited_amount ?? 0);
+      const { balanceDue } = resolveSettlementState({
+        grandTotal,
+        paidAmount,
+        creditedAmount,
+      });
 
       if (payAmount.greaterThan(balanceDue)) {
         throw AppError.validation('Payment exceeds the outstanding balance', {
@@ -69,8 +76,11 @@ export const invoiceService = {
       }
 
       const newPaid = money(paidAmount.plus(payAmount));
-      const newBalance = computeBalanceDue(grandTotal, newPaid);
-      const paymentStatus = resolvePaymentStatusEnum(grandTotal, newPaid);
+      const { balanceDue: newBalance, paymentStatus } = resolveSettlementState({
+        grandTotal,
+        paidAmount: newPaid,
+        creditedAmount,
+      });
 
       const paymentCode = await nextCode(tx, SEQ.PAYMENT);
       await paymentRepo.create(

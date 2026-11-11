@@ -1,4 +1,5 @@
 import { z } from './common.js';
+import { GST_SLABS, isGstSlab } from '../lib/gst.js';
 
 /**
  * Validation schemas.
@@ -9,6 +10,14 @@ import { z } from './common.js';
  */
 
 const trimmed = (max, message) => z.string().trim().min(1, message).max(max);
+
+/**
+ * A GST tax slab. Every rate that enters the system — product defaults and
+ * per-line invoice rates — must be one of `lib/gst.js#GST_SLABS`.
+ */
+const gstSlab = z.coerce
+  .number()
+  .refine(isGstSlab, { message: `GST rate must be one of: ${GST_SLABS.map((s) => `${s}%`).join(', ')}` });
 
 export const emailSchema = z
   .string()
@@ -193,7 +202,7 @@ export const createProductSchema = z
     mrp: money2.refine((v) => v > 0, { message: 'MRP must be greater than 0' }),
     sellingPrice: money2.refine((v) => v > 0, { message: 'Selling price must be greater than 0' }),
     costPrice: money2.refine((v) => v > 0, { message: 'Cost price must be greater than 0' }),
-    taxRate: z.coerce.number().min(0).max(100).default(18),
+    taxRate: gstSlab.default(18),
     stockQuantity: z.coerce.number().int().min(0, 'Stock cannot be negative').default(0),
     minStockLevel: z.coerce.number().int().min(0, 'Reorder level cannot be negative').default(10),
     isActive: z.coerce.boolean().optional(),
@@ -226,7 +235,7 @@ export const updateProductSchema = z
     mrp: money2.refine((v) => v > 0, { message: 'MRP must be greater than 0' }).optional(),
     sellingPrice: money2.refine((v) => v > 0, { message: 'Selling price must be greater than 0' }).optional(),
     costPrice: money2.refine((v) => v > 0, { message: 'Cost price must be greater than 0' }).optional(),
-    taxRate: z.coerce.number().min(0).max(100).optional(),
+    taxRate: gstSlab.optional(),
     // Direct stock writes are intentionally NOT accepted here: stock only ever
     // moves through POST /api/products/:id/stock-adjustments so that every change
     // leaves a stock_movements audit row.
@@ -313,6 +322,10 @@ export const saleItemSchema = z.object({
   quantity: z.coerce.number().int().positive('Quantity must be greater than 0'),
   // Optional: the server re-reads the authoritative price from the catalogue.
   unitPrice: z.coerce.number().min(0).optional(),
+  // Optional per-line GST slab. When absent the server falls back to the
+  // product's own rate (and finally to the invoice-level `taxRate`), so
+  // older clients that never send the field keep working unchanged.
+  taxRate: gstSlab.optional(),
 });
 
 export const createSaleSchema = z
@@ -322,7 +335,8 @@ export const createSaleSchema = z
     items: z.array(saleItemSchema).min(1, 'Add at least one product to the sale'),
     discountType: z.enum(['percent', 'flat']).default('percent'),
     discountValue: z.coerce.number().min(0).default(0),
-    taxRate: z.coerce.number().min(0).max(100).default(18),
+    // Invoice-level fallback rate; lines may override it with their own slab.
+    taxRate: gstSlab.default(18),
     shippingCharges: z.coerce.number().min(0).default(0),
     // 'full' pays the invoice in full; 'partial' uses paymentAmount.
     paymentMode: z.enum(['full', 'partial', 'none']).default('full'),
@@ -384,6 +398,37 @@ export const recordPaymentSchema = z.object({
 });
 
 export const idParam = z.object({ id: z.string().trim().min(1) });
+
+// ---------------------------------------------------------------------------
+// Credit notes
+// ---------------------------------------------------------------------------
+
+/**
+ * One credited line. Money never travels in the payload: the service reads
+ * unit price, tax rate and discount from the stored invoice item, so a client
+ * can only ever choose *how many* of the invoiced units are being returned.
+ */
+export const creditNoteLineSchema = z.object({
+  invoiceItemId: z.coerce.number().int().positive('Line is required'),
+  quantity: z.coerce.number().int().positive('Quantity must be greater than 0'),
+});
+
+export const createCreditNoteSchema = z.object({
+  invoiceId: z.string().trim().min(1, 'Invoice is required'),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Must be a valid YYYY-MM-DD date').optional(),
+  reason: z.string().trim().max(255).nullish(),
+  items: z.array(creditNoteLineSchema).min(1, 'Select at least one line to credit'),
+});
+
+export const creditNoteListQuerySchema = z.object({
+  search: z.string().trim().optional(),
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  sort: z.enum(['date', 'amount']).default('date'),
+  order: z.enum(['asc', 'desc']).default('desc'),
+  page: z.coerce.number().int().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+});
 
 // ---------------------------------------------------------------------------
 // Ledger

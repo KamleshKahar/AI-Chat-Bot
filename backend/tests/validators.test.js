@@ -7,6 +7,12 @@ import {
   resetPasswordSchema,
   userListQuerySchema,
   changePasswordSchema,
+  createProductSchema,
+  createSaleSchema,
+  saleItemSchema,
+  creditNoteLineSchema,
+  createCreditNoteSchema,
+  creditNoteListQuerySchema,
 } from '../src/schemas/validators.js';
 
 /** Field-keyed issues, shaped the way `middleware/validate.js` reports them. */
@@ -170,5 +176,144 @@ describe('changePasswordSchema', () => {
       issues(changePasswordSchema, { currentPassword: 'x', newPassword: 'longenough' }),
       {}
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GST slabs
+// ---------------------------------------------------------------------------
+
+/** The five slabs `lib/gst.js#GST_SLABS` publishes; mirrored here on purpose. */
+const SLABS = [0, 5, 12, 18, 28];
+
+describe('GST slab validation', () => {
+  const product = {
+    name: 'Widget',
+    sku: 'WGT-1',
+    category: 'CAT-01',
+    mrp: 100,
+    sellingPrice: 80,
+    costPrice: 50,
+  };
+
+  test('every published slab is accepted on a product', () => {
+    for (const rate of SLABS) {
+      assert.equal(createProductSchema.parse({ ...product, taxRate: rate }).taxRate, rate);
+    }
+  });
+
+  test('a rate outside the schedule is rejected on a product', () => {
+    assert.ok(issues(createProductSchema, { ...product, taxRate: 7 }).taxRate);
+    assert.ok(issues(createProductSchema, { ...product, taxRate: 17.5 }).taxRate);
+    assert.ok(issues(createProductSchema, { ...product, taxRate: 30 }).taxRate);
+    assert.ok(issues(createProductSchema, { ...product, taxRate: -5 }).taxRate);
+  });
+
+  test('a product defaults to the 18% slab', () => {
+    assert.equal(createProductSchema.parse(product).taxRate, 18);
+  });
+
+  test('the invoice-level sale rate is slab-validated too', () => {
+    const sale = { customerId: 'CUST-001', items: [{ productId: 'PRD-1', quantity: 1 }] };
+    assert.equal(createSaleSchema.parse(sale).taxRate, 18);
+    assert.equal(createSaleSchema.parse({ ...sale, taxRate: 28 }).taxRate, 28);
+    assert.ok(issues(createSaleSchema, { ...sale, taxRate: 7 }).taxRate);
+  });
+
+  test('a sale line may carry its own slab — 0% included', () => {
+    assert.equal(saleItemSchema.parse({ productId: 'PRD-1', quantity: 2 }).taxRate, undefined);
+    assert.equal(
+      saleItemSchema.parse({ productId: 'PRD-1', quantity: 2, taxRate: 0 }).taxRate,
+      0
+    );
+    assert.ok(issues(saleItemSchema, { productId: 'PRD-1', quantity: 2, taxRate: 15 }).taxRate);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Credit notes
+// ---------------------------------------------------------------------------
+
+describe('createCreditNoteSchema', () => {
+  const valid = {
+    invoiceId: 'INV-2026-001',
+    items: [{ invoiceItemId: 12, quantity: 2 }],
+  };
+
+  test('accepts a minimal payload and defaults the date', () => {
+    const parsed = createCreditNoteSchema.parse(valid);
+    assert.equal(parsed.invoiceId, 'INV-2026-001');
+    assert.equal(parsed.date, undefined); // the service stamps today
+    assert.equal(parsed.items.length, 1);
+    assert.equal(parsed.items[0].quantity, 2);
+  });
+
+  test('money never travels in the payload — amounts are stripped, not stored', () => {
+    const parsed = createCreditNoteSchema.parse({
+      ...valid,
+      grandTotal: 1,
+      taxAmount: 9999,
+      reason: 'Customer returned 2 units',
+    });
+    assert.equal('grandTotal' in parsed, false);
+    assert.equal('taxAmount' in parsed, false);
+    assert.equal(parsed.reason, 'Customer returned 2 units');
+  });
+
+  test('requires an invoice and at least one line', () => {
+    assert.ok(issues(createCreditNoteSchema, { items: valid.items }).invoiceId);
+    assert.ok(issues(createCreditNoteSchema, { invoiceId: 'INV-2026-001', items: [] }).items);
+  });
+
+  test('quantities must be positive integers', () => {
+    assert.ok(
+      issues(createCreditNoteSchema, {
+        ...valid,
+        items: [{ invoiceItemId: 12, quantity: 0 }],
+      })['items.0.quantity']
+    );
+    assert.ok(
+      issues(createCreditNoteSchema, {
+        ...valid,
+        items: [{ invoiceItemId: 12, quantity: -1 }],
+      })['items.0.quantity']
+    );
+    assert.ok(
+      issues(createCreditNoteSchema, {
+        ...valid,
+        items: [{ invoiceItemId: 12, quantity: 1.5 }],
+      })['items.0.quantity']
+    );
+  });
+
+  test('a malformed document date is rejected', () => {
+    assert.ok(issues(createCreditNoteSchema, { ...valid, date: '31/10/2026' }).date);
+    assert.equal(
+      createCreditNoteSchema.parse({ ...valid, date: '2026-10-31' }).date,
+      '2026-10-31'
+    );
+  });
+
+  test('the line schema on its own keys issues by field', () => {
+    assert.deepEqual(creditNoteLineSchema.parse({ invoiceItemId: 3, quantity: 1 }), {
+      invoiceItemId: 3,
+      quantity: 1,
+    });
+    assert.ok(issues(creditNoteLineSchema, { quantity: 1 }).invoiceItemId);
+  });
+});
+
+describe('creditNoteListQuerySchema', () => {
+  test('sorts by date descending by default and coerces paging', () => {
+    const parsed = creditNoteListQuerySchema.parse({ page: '2', limit: '25' });
+    assert.equal(parsed.sort, 'date');
+    assert.equal(parsed.order, 'desc');
+    assert.equal(parsed.page, 2);
+    assert.equal(parsed.limit, 25);
+  });
+
+  test('rejects unknown sorts and malformed dates', () => {
+    assert.ok(issues(creditNoteListQuerySchema, { sort: 'popularity' }).sort);
+    assert.ok(issues(creditNoteListQuerySchema, { from: 'yesterday' }).from);
   });
 });

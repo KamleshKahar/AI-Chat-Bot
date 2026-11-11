@@ -3,6 +3,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Plus, Trash2, Search, ShoppingCart, AlertTriangle } from 'lucide-react';
 import { calculateSaleTotals, round2, resolvePaymentStatus } from '@/lib/salesLogic';
+import { GST_SLAB_OPTIONS } from '@/lib/gst';
 import { formatCurrency } from '@/lib/formatters';
 import { useServerList, useDebouncedValue } from '@/hooks/useServerQuery';
 import { Button } from '@/components/ui/Button';
@@ -76,8 +77,16 @@ export function CreateSaleForm({ customers = [], onSubmit, onCancel, isSubmittin
 
   const selectedCustomer = customers.find((c) => c.id === customerId);
 
-  // Sales tax rate derived from the first line item's product (keeps invoices consistent)
+  // Invoice-level FALLBACK rate. Every line carries its own GST slab, so this
+  // only matters for lines that somehow arrive without one; the server honours
+  // the per-line rate and uses this only as the last resort.
   const taxRate = lines.length > 0 ? Number(lines[0].taxRate ?? 18) : 18;
+
+  // Distinct slabs on the bill — used to label the summary line honestly
+  // ("GST (18%)" vs "GST (mixed)").
+  const distinctRates = [...new Set(lines.map((l) => Number(l.taxRate ?? 18)))].sort(
+    (a, b) => a - b
+  );
 
   const totals = useMemo(
     () =>
@@ -153,6 +162,17 @@ export function CreateSaleForm({ customers = [], onSubmit, onCancel, isSubmittin
       prev.map((line) =>
         line.key === key ? { ...line, unitPrice: Math.max(0, Number(value || 0)) } : line
       )
+    );
+  };
+
+  /**
+   * Per-line GST slab. Only slabs from `lib/gst.js` are offered, which is
+   * exactly the set the server validates — a rate the API would reject can
+   * never be selected here.
+   */
+  const handleRateChange = (key, value) => {
+    setLines((prev) =>
+      prev.map((line) => (line.key === key ? { ...line, taxRate: Number(value) } : line))
     );
   };
 
@@ -235,6 +255,9 @@ export function CreateSaleForm({ customers = [], onSubmit, onCancel, isSubmittin
       // Optional: the server re-reads the authoritative price from the
       // catalogue, so a stale price cannot be baked into the invoice.
       unitPrice: Number(line.unitPrice),
+      // The line's chosen GST slab. The server also falls back to the
+      // product's own rate when this is omitted.
+      taxRate: Number(line.taxRate ?? 18),
     })),
 
     discountType,
@@ -370,12 +393,13 @@ export function CreateSaleForm({ customers = [], onSubmit, onCancel, isSubmittin
             </div>
           ) : (
             <div className="mt-4 overflow-x-auto">
-              <table className="w-full text-left text-sm min-w-[600px]">
+              <table className="w-full text-left text-sm min-w-[680px]">
                 <thead className="text-[11px] font-semibold uppercase tracking-wider text-slate-500 border-b border-slate-200">
                   <tr>
                     <th className="pb-2">Product</th>
                     <th className="pb-2 w-24 text-center">Qty</th>
                     <th className="pb-2 w-32">Unit Price</th>
+                    <th className="pb-2 w-24">GST</th>
                     <th className="pb-2 w-28 text-right">Amount</th>
                     <th className="pb-2 w-10"></th>
                   </tr>
@@ -427,6 +451,20 @@ export function CreateSaleForm({ customers = [], onSubmit, onCancel, isSubmittin
                             onChange={(e) => handlePriceChange(line.key, e.target.value)}
                             className="w-full rounded-lg border border-slate-300 px-2 py-1.5 text-sm text-slate-900 focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20"
                           />
+                        </td>
+                        <td className="py-3 px-1">
+                          <select
+                            value={Number(line.taxRate ?? 18)}
+                            onChange={(e) => handleRateChange(line.key, e.target.value)}
+                            aria-label={`GST rate for ${line.productName}`}
+                            className="w-full rounded-lg border border-slate-300 px-1.5 py-1.5 text-sm text-center text-slate-900 focus:outline-none focus:border-indigo-600 focus:ring-2 focus:ring-indigo-500/20"
+                          >
+                            {GST_SLAB_OPTIONS.map((opt) => (
+                              <option key={opt.value} value={opt.value}>
+                                {opt.label}
+                              </option>
+                            ))}
+                          </select>
                         </td>
                         <td className="py-3 text-right font-bold text-slate-900 whitespace-nowrap">
                           {formatCurrency(Number(line.quantity) * Number(line.unitPrice))}
@@ -545,7 +583,12 @@ export function CreateSaleForm({ customers = [], onSubmit, onCancel, isSubmittin
             </div>
 
             <div className="flex justify-between text-slate-600">
-              <span>GST ({totals.taxRate}%)</span>
+              <span>
+                GST
+                {distinctRates.length === 1
+                  ? ` (${distinctRates[0]}%)`
+                  : ` (${distinctRates.join('%, ')}%)`}
+              </span>
               <span className="font-semibold text-slate-900">{formatCurrency(totals.taxAmount)}</span>
             </div>
 

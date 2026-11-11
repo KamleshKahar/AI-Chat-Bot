@@ -202,6 +202,42 @@ export function DataProvider({ children }) {
   );
 
   /**
+   * Issue a credit note (return document) against an invoice.
+   *
+   * The payload only carries line + quantity choices; the server prices the
+   * note from the stored invoice, restocks inventory and reduces the invoice
+   * balance in one transaction.
+   *
+   * @param {string} invoiceId INV-2026-001
+   * @param {{items: Array<{invoiceItemId: number, quantity: number}>, reason?: string, date?: string}} payload
+   * @returns {Promise<object>} the issued credit note
+   */
+  const createCreditNote = useCallback(
+    async (invoiceId, payload) => {
+      const { data } = await apiPost('/credit-notes', {
+        invoiceId,
+        ...payload,
+      });
+      invalidate();
+      return data;
+    },
+    [invalidate]
+  );
+
+  /**
+   * Delete (fully reverse) a credit note: stock goes back down, the refund
+   * ledger row is removed and the invoice credit shrinks. ADMIN-only upstream.
+   */
+  const deleteCreditNote = useCallback(
+    async (id) => {
+      const { data } = await apiDelete(`/credit-notes/${encodeURIComponent(id)}`);
+      invalidate();
+      return data;
+    },
+    [invalidate]
+  );
+
+  /**
    * User administration. ADMIN-only upstream (`user:read` / `user:write`), so
    * these reject with a 403 for anyone else — the `/users` page only mounts for
    * an administrator, but the guard is the server's, not the UI's.
@@ -269,6 +305,8 @@ export function DataProvider({ children }) {
 
       createSale,
       updateInvoicePayment,
+      createCreditNote,
+      deleteCreditNote,
 
       createUser,
       updateUser,
@@ -293,6 +331,8 @@ export function DataProvider({ children }) {
       deleteCategory,
       createSale,
       updateInvoicePayment,
+      createCreditNote,
+      deleteCreditNote,
       createUser,
       updateUser,
       resetUserPassword,

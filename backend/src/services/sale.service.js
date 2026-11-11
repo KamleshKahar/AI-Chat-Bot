@@ -82,6 +82,8 @@ export const saleService = {
           product,
           quantity: Number(item.quantity),
           requestedPrice: item.unitPrice,
+          // The line's chosen GST slab (optional in the payload).
+          taxRate: item.taxRate,
         });
       }
 
@@ -105,10 +107,14 @@ export const saleService = {
       // `unitPrice` falls back to the catalogue selling price; a client-supplied
       // price is honoured so negotiated rates still work, but every *total* is
       // recomputed here and the client's own totals are discarded entirely.
+      //
+      // Each line carries its own GST slab: the one the client picked, else the
+      // product's default rate, else the invoice-level fallback.
       const lineInput = resolved.map((r) => ({
         productId: r.product.code,
         quantity: r.quantity,
         unitPrice: r.requestedPrice ?? r.product.sellingPrice,
+        taxRate: r.taxRate ?? r.product.taxRate ?? payload.taxRate,
       }));
 
       const taxType = resolveTaxType(
@@ -201,7 +207,7 @@ export const saleService = {
               unitPrice: line.unitPrice,
               discountAmount: line.discountAmount,
               taxableValue: line.taxableValue,
-              taxRate: totals.taxRate,
+              taxRate: line.taxRate,
               cgstAmount: line.cgstAmount,
               sgstAmount: line.sgstAmount,
               igstAmount: line.igstAmount,

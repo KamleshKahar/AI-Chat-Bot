@@ -149,6 +149,9 @@ export const SaleSchema = z
     taxAmount: z.number(),
     grandTotal: z.number(),
     paidAmount: z.number(),
+    /// Value already credited back by credit notes. `balanceDue` is
+    /// grandTotal - paidAmount - creditedAmount.
+    creditedAmount: z.number(),
     balanceDue: z.number(),
     paymentStatus: z.enum(['Pending', 'Partial', 'Paid', 'Overdue']),
     paymentMethod: z.string(),
@@ -188,6 +191,35 @@ export const InvoiceSchema = SaleSchema.omit({
     createdAt: z.string().nullable(),
   })
   .openapi('Invoice');
+
+export const CreditNoteSchema = z
+  .object({
+    id: z.string().openapi({ example: 'CRN-2026-001' }),
+    invoiceId: z.string().openapi({ example: 'INV-2026-001' }),
+    date: z.string().openapi({ example: '2026-10-31' }),
+    reason: z.string().nullable(),
+    // Frozen customer snapshot, copied from the invoice at creation.
+    customer: z.object({
+      id: z.string().nullable(),
+      name: z.string().nullable(),
+      company: z.string().nullable(),
+      gstin: z.string().nullable(),
+      state: z.string().nullable(),
+    }),
+    items: z.array(SaleItemSchema),
+    subtotal: z.number(),
+    discountAmount: z.number(),
+    taxableAmount: z.number(),
+    taxType: z.enum(['CGST_SGST', 'IGST']),
+    taxRate: z.number(),
+    cgstAmount: z.number(),
+    sgstAmount: z.number(),
+    igstAmount: z.number(),
+    taxAmount: z.number(),
+    grandTotal: z.number(),
+    createdAt: z.string().nullable(),
+  })
+  .openapi('CreditNote');
 
 export const TransactionSchema = z
   .object({

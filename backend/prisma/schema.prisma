@@ -89,6 +89,7 @@ enum ReferenceType {
   ADJUSTMENT
   PURCHASE
   RETURN
+  CREDIT_NOTE
 }
 
 enum LedgerDirection {
@@ -161,6 +162,7 @@ model User {
   payments       Payment[]
   stockMovements StockMovement[]
   auditLogs      AuditLog[]
+  creditNotes    CreditNote[]
 
   @@index([isActive])
   @@map("users")
@@ -226,6 +228,7 @@ model Product {
 
   category      Category         @relation(fields: [categoryId], references: [id])
   invoiceItems  InvoiceItem[]
+  creditNoteItems CreditNoteItem[]
   stockMovement StockMovement[]
 
   @@index([categoryId], map: "idx_products_category")
@@ -273,6 +276,7 @@ model Customer {
   invoices Invoice[]
   payments Payment[]
   ledger   LedgerEntry[]
+  creditNotes CreditNote[]
 
   @@index([status, deletedAt], map: "idx_customers_status")
   @@index([name], map: "idx_customers_name")
@@ -310,6 +314,10 @@ model Invoice {
   shippingCharges  Decimal      @default(0) @map("shipping_charges") @db.Decimal(14, 2)
   grandTotal       Decimal      @map("grand_total") @db.Decimal(14, 2)
   paidAmount       Decimal      @default(0) @map("paid_amount") @db.Decimal(14, 2)
+  /// Value already credited back by credit notes. `balanceDue` is
+  /// grand_total - paid_amount - credited_amount (see lib/billing.js
+  /// #resolveSettlementState); credits extinguish a receivable without cash.
+  creditedAmount   Decimal      @default(0) @map("credited_amount") @db.Decimal(14, 2)
   balanceDue       Decimal      @default(0) @map("balance_due") @db.Decimal(14, 2)
 
   // `Overdue` is NEVER written here — it is derived at read time.
@@ -341,6 +349,7 @@ model Invoice {
   items           InvoiceItem[]
   payments        Payment[]
   ledger          LedgerEntry[]
+  creditNotes     CreditNote[]
 
   @@index([customerId], map: "idx_invoices_customer")
   @@index([invoiceDate], map: "idx_invoices_date")
@@ -376,9 +385,101 @@ model InvoiceItem {
   invoice Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   product Product? @relation(fields: [productId], references: [id])
 
+  creditNoteItems CreditNoteItem[]
+
   @@index([invoiceId], map: "idx_items_invoice")
   @@index([productId], map: "idx_items_product")
   @@map("invoice_items")
+}
+
+/// A credit note: an immutable return document raised against one invoice.
+///
+/// Line items snapshot the ORIGINAL invoice's prices, rates and HSN codes (the
+/// same legal-document rule the invoice itself follows), and money columns are
+/// always recomputed by lib/billing.js#computeCreditNoteTotals inside the
+/// creating transaction — a client never supplies an amount. Issued notes are
+/// never edited: a correction is a new note, and DELETE (ADMIN only) reverses
+/// the whole effect (stock, ledger, invoice credit) in one transaction.
+model CreditNote {
+  id               Int      @id @default(autoincrement())
+  creditNoteNumber String   @unique @map("credit_note_number") @db.VarChar(32)
+
+  invoiceId Int @map("invoice_id")
+  customerId Int @map("customer_id")
+
+  creditDate DateTime @map("credit_date") @db.Date
+  reason     String?  @db.VarChar(255)
+
+  // ---- money (all DECIMAL(14,2), all computed server-side) ----
+  subtotal       Decimal @default(0) @map("subtotal") @db.Decimal(14, 2)
+  discountAmount Decimal @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  taxableAmount  Decimal @default(0) @map("taxable_amount") @db.Decimal(14, 2)
+  taxType        TaxType @default(CGST_SGST) @map("tax_type")
+  /// The invoice's fallback rate, kept for header display only — lines may
+  /// carry mixed slabs, exactly like an invoice.
+  taxRate      Decimal @default(18) @map("tax_rate") @db.Decimal(5, 2)
+  cgstAmount   Decimal @default(0) @map("cgst_amount") @db.Decimal(14, 2)
+  sgstAmount   Decimal @default(0) @map("sgst_amount") @db.Decimal(14, 2)
+  igstAmount   Decimal @default(0) @map("igst_amount") @db.Decimal(14, 2)
+  taxAmount    Decimal @default(0) @map("tax_amount") @db.Decimal(14, 2)
+  grandTotal   Decimal @default(0) @map("grand_total") @db.Decimal(14, 2)
+
+  // ---- frozen customer snapshot (copied from the invoice at creation) ----
+  snapshotName    String? @map("snapshot_name") @db.VarChar(160)
+  snapshotCompany String? @map("snapshot_company") @db.VarChar(160)
+  snapshotGstin   String? @map("snapshot_gstin") @db.VarChar(15)
+  snapshotState   String? @map("snapshot_state") @db.VarChar(80)
+
+  createdById Int?     @map("created_by")
+  createdAt   DateTime @map("created_at") @default(now()) @db.DateTime(3)
+  updatedAt   DateTime @map("updated_at") @updatedAt @db.DateTime(3)
+  deletedAt   DateTime? @map("deleted_at") @db.DateTime(3)
+
+  invoice  Invoice  @relation(fields: [invoiceId], references: [id])
+  customer Customer @relation(fields: [customerId], references: [id])
+  createdBy User?   @relation(fields: [createdById], references: [id])
+  items     CreditNoteItem[]
+
+  @@index([invoiceId], map: "idx_credit_notes_invoice")
+  @@index([customerId], map: "idx_credit_notes_customer")
+  @@index([creditDate], map: "idx_credit_notes_date")
+  @@index([deletedAt], map: "idx_credit_notes_deleted")
+  @@map("credit_notes")
+}
+
+model CreditNoteItem {
+  id            Int     @id @default(autoincrement())
+  creditNoteId Int      @map("credit_note_id")
+  /// Points back at the invoiced line this credit returns part of — the
+  /// quantity cap ("at most what was invoiced") is enforced against it.
+  invoiceItemId Int?    @map("invoice_item_id")
+  productId     Int?    @map("product_id")
+
+  // frozen product snapshot (copied from the invoice item)
+  productName String  @map("product_name") @db.VarChar(255)
+  sku         String  @db.VarChar(40)
+  unit        String? @db.VarChar(20)
+  hsnCode     String? @map("hsn_code") @db.VarChar(12)
+
+  quantity       Int     @default(1)
+  unitPrice      Decimal @map("unit_price") @db.Decimal(14, 2)
+  discountAmount Decimal @default(0) @map("discount_amount") @db.Decimal(14, 2)
+  taxableValue   Decimal @map("taxable_value") @db.Decimal(14, 2)
+  taxRate        Decimal @map("tax_rate") @db.Decimal(5, 2)
+  cgstAmount     Decimal @default(0) @map("cgst_amount") @db.Decimal(14, 2)
+  sgstAmount     Decimal @default(0) @map("sgst_amount") @db.Decimal(14, 2)
+  igstAmount     Decimal @default(0) @map("igst_amount") @db.Decimal(14, 2)
+  lineTotal      Decimal @map("line_total") @db.Decimal(14, 2)
+
+  sortOrder Int @default(0) @map("sort_order")
+
+  creditNote  CreditNote  @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
+  invoiceItem InvoiceItem? @relation(fields: [invoiceItemId], references: [id])
+  product     Product?    @relation(fields: [productId], references: [id])
+
+  @@index([creditNoteId], map: "idx_credit_note_items_note")
+  @@index([invoiceItemId], map: "idx_credit_note_items_line")
+  @@map("credit_note_items")
 }
 
 model Payment {

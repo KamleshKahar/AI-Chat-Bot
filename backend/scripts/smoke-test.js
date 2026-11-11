@@ -6,7 +6,8 @@
  *   customer CRUD -> sale (with authoritative totals and stock movement) ->
  *   partial payment -> final payment -> derived Overdue -> all reports ->
  *   concurrency (two overselling sales, exactly one wins) -> soft delete ->
- *   validation failures -> error envelope shape
+ *   role matrix -> documentation -> credit notes (issue, cap, reverse) with
+ *   GST reports net of returns -> validation failures -> error envelope shape
  *
  * Self-bootstrapping — no seed step exists any more:
  *   npm start                     # in one shell
@@ -55,7 +56,7 @@ const RUN = process.env.SMOKE_RUN_ID ?? Date.now().toString(36).toUpperCase().sl
 const GSTIN = `27AAAAA${RUN}1Z`;
 
 /**
- * Every invoice this run creates, so section 13 can soft-delete them again.
+ * Every invoice this run creates, so section 14 can soft-delete them again.
  * Sales are the only thing this test writes that has no natural cascade
  * cleanup: a soft-deleted customer/product does not remove the invoices that
  * referenced it, so without this the dataset grows by ~6 invoices and ~8 ledger
@@ -550,7 +551,7 @@ async function run() {
   eq('sale with spoofed totals -> 201', spoofed.status, 201);
   const spoofedSale = spoofed.body?.data?.sale;
   // This sale is real — only its client-supplied totals were lies — so it owns a
-  // real invoice that section 13 has to clean up too.
+  // real invoice that section 14 has to clean up too.
   trackInvoice(spoofed);
   money('spoofed subtotal ignored', spoofedSale?.subtotal, 400);
   money('spoofed grandTotal ignored', spoofedSale?.grandTotal, 472);
@@ -758,6 +759,9 @@ async function run() {
     '/api/reports/customer-performance',
     '/api/reports/cash-flow',
     '/api/reports/receivables-aging',
+    '/api/reports/gst-summary',
+    '/api/reports/gst-hsn',
+    '/api/reports/gst-customers',
   ];
   for (const path of reportEndpoints) {
     const res = await api('GET', path);
@@ -1010,7 +1014,277 @@ async function run() {
   eq('GET /api/docs -> 200', docs.status, 200);
 
   // -------------------------------------------------------------------------
-  section('13. Clean up test records');
+  section('13. Credit notes and GST reports');
+
+  /*
+   * The return lifecycle end to end, on one mixed-rate invoice:
+   *   issue (MANAGER) -> over-credit rejected -> balance the invoice (ADMIN)
+   *   -> GST reports net of the returns -> ADMIN-only reversal -> 404 after.
+   * The invoice is raised unpaid so creditedAmount and balanceDue can be read
+   * with no payment in the way.
+   */
+  const gstWindow = 'from=2000-01-01&to=2100-01-01';
+
+  /** cgst + sgst + igst must always reconstruct the tax total exactly. */
+  const splitOk = (totals) =>
+    Math.round(
+      (Number(totals?.cgstAmount) + Number(totals?.sgstAmount) + Number(totals?.igstAmount)) * 100
+    ) === Math.round(Number(totals?.taxAmount) * 100);
+
+  /** The rate-wise row for one slab, intra-state supply. */
+  const rateRow = (rates, rate) =>
+    (rates ?? []).find((r) => Number(r.rate) === rate && r.taxType === 'CGST_SGST');
+
+  const stockOf = async (id) =>
+    (await api('GET', `/api/products/${id}`)).body?.data?.product?.stockQuantity;
+
+  const mixedSale = await api('POST', '/api/sales', {
+    customerId: buyer.id,
+    items: [
+      { productId: product.id, quantity: 4, taxRate: 5 },
+      { productId: product2.body?.data?.id, quantity: 2, taxRate: 18 },
+    ],
+    discountType: 'percent',
+    discountValue: 0,
+    taxRate: 18,
+    paymentMode: 'none',
+    paymentMethod: 'Cash',
+    notes: 'Smoke test credit-note host',
+  });
+  eq('mixed-rate sale for the return -> 201', mixedSale.status, 201);
+  const mixedInvoice = trackInvoice(mixedSale);
+
+  //   4 x 400 @ 5%  -> taxable 1600, tax  80 (CGST 40 / SGST 40)
+  //   2 x 1950 @ 18% -> taxable 3900, tax 702 (CGST 351 / SGST 351)
+  //   taxable 5500, tax 782, grand total 6282, nothing paid.
+  const mixedLines = mixedInvoice?.items ?? [];
+  const line5 = mixedLines.find((i) => Number(i.taxRate) === 5);
+  const line18 = mixedLines.find((i) => Number(i.taxRate) === 18);
+  check(
+    'both per-line slabs landed on the invoice',
+    !!line5 && !!line18,
+    JSON.stringify(mixedLines.map((i) => i.taxRate))
+  );
+  money('5% line taxable', line5?.taxableValue, 1600);
+  money('18% line taxable', line18?.taxableValue, 3900);
+  money('invoice taxable', mixedInvoice?.taxableAmount, 5500);
+  money('invoice tax = 80 + 702', mixedInvoice?.taxAmount, 782);
+  money('invoice grand total', mixedInvoice?.grandTotal, 6282);
+  money('nothing paid yet', mixedInvoice?.paidAmount, 0);
+  eq('unpaid reads as Pending', mixedInvoice?.paymentStatus, 'Pending');
+
+  const productStockBefore = await stockOf(product.id);
+  const paperStockBefore = await stockOf(product2.body?.data?.id);
+
+  // The window is deliberately wide: the assertions below are DELTAS taken
+  // around each credit note, so no clock edge can move them.
+  const gstBefore = await api('GET', `/api/reports/gst-summary?${gstWindow}`);
+  eq('GET /api/reports/gst-summary -> 200', gstBefore.status, 200);
+  const gstBeforeTotals = gstBefore.body?.data?.totals;
+  check('GST totals keep the split identity', splitOk(gstBeforeTotals));
+  const before5 = rateRow(gstBefore.body?.data?.rates, 5);
+  check('the 5% slab has a row to compare', !!before5);
+
+  // Issuing is ADMIN/MANAGER; reading is everyone; the reports are not.
+  token = cashier.token;
+  const cashierNote = await api('POST', '/api/credit-notes', {
+    invoiceId: mixedInvoice.id,
+    items: [{ invoiceItemId: Number(line5.id), quantity: 1 }],
+  });
+  eq('CASHIER issuing a credit note -> 403', cashierNote.status, 403);
+
+  token = viewer.token;
+  eq(
+    'VIEWER can read credit notes',
+    (await api('GET', '/api/credit-notes?limit=1')).status,
+    200
+  );
+  eq(
+    'VIEWER GST reports -> 403',
+    (await api('GET', '/api/reports/gst-summary')).status,
+    403
+  );
+
+  // A manager's call: partial return of the 5% line, 2 of the 4 rolls.
+  token = manager.token;
+  const crnARes = await api('POST', '/api/credit-notes', {
+    invoiceId: mixedInvoice.id,
+    reason: 'Damaged in transit',
+    items: [{ invoiceItemId: Number(line5.id), quantity: 2 }],
+  });
+  eq('MANAGER issuing a credit note -> 201', crnARes.status, 201);
+  const crnA = crnARes.body?.data;
+  check('CRN number allocated', /^CRN-\d{4}-\d{3}$/.test(crnA?.id ?? ''), crnA?.id);
+  eq('note links back to its invoice', crnA?.invoiceId, mixedInvoice.id);
+  eq('note carries the customer snapshot', crnA?.customer?.name, `Smoke Test Buyer ${RUN}`);
+  money('taxable credited = 2 x 400', crnA?.taxableAmount, 800);
+  money('GST reversed = 5% of 800', crnA?.taxAmount, 40);
+  money('credit value = 840', crnA?.grandTotal, 840);
+  eq('reason stored', crnA?.reason, 'Damaged in transit');
+
+  // The two effects a return must have everywhere, immediately.
+  eq(
+    'returned units restock immediately',
+    await stockOf(product.id),
+    productStockBefore + 2
+  );
+  const afterA = await api('GET', `/api/invoices/${mixedInvoice.id}`);
+  money('invoice creditedAmount grows', afterA.body?.data?.creditedAmount, 840);
+  money('balance shrinks by the credit', afterA.body?.data?.balanceDue, 6282 - 840);
+
+  const refundSearch = await api('GET', `/api/ledger?search=${crnA.id}`);
+  eq('GET /api/ledger?search=<CRN> -> 200', refundSearch.status, 200);
+  // The ledger serialises for display: `entryType` is the machine type,
+  // `type` is the human label ("Refund").
+  const refundRow = (refundSearch.body?.data ?? []).find((r) => r.entryType === 'REFUND');
+  check('a REFUND row was written', !!refundRow, JSON.stringify(refundSearch.body?.data));
+  eq('refund flows OUT of the till', refundRow?.direction, 'OUT');
+  money('refund amount = the credit value', refundRow?.amount, crnA.grandTotal);
+
+  // The GST reports must show NET output tax: the credit subtracts.
+  const gstAfterA = await api('GET', `/api/reports/gst-summary?${gstWindow}`);
+  const after5 = rateRow(gstAfterA.body?.data?.rates, 5);
+  money(
+    '5% taxable is NET of the credit',
+    after5?.taxableValue,
+    Number(before5?.taxableValue) - 800
+  );
+  money('5% tax is NET of the credit', after5?.taxAmount, Number(before5?.taxAmount) - 40);
+  money(
+    'report totals drop by the credited taxable',
+    gstAfterA.body?.data?.totals?.taxableValue,
+    Number(gstBeforeTotals?.taxableValue) - 800
+  );
+  check('split identity holds after the credit', splitOk(gstAfterA.body?.data?.totals));
+
+  // Caps: past the invoiced quantity, and at a line this invoice never had.
+  const overCredit = await api('POST', '/api/credit-notes', {
+    invoiceId: mixedInvoice.id,
+    items: [{ invoiceItemId: Number(line5.id), quantity: 5 }],
+  });
+  eq('crediting past the invoiced quantity -> 422', overCredit.status, 422);
+  check(
+    'the cap message says what is still returnable',
+    /exceeds what is still returnable/.test(overCredit.body?.error?.message ?? '') &&
+      /remain returnable/.test(JSON.stringify(overCredit.body?.error?.details ?? {})),
+    overCredit.body?.error?.message
+  );
+  const foreignLine = await api('POST', '/api/credit-notes', {
+    invoiceId: mixedInvoice.id,
+    items: [{ invoiceItemId: 999999999, quantity: 1 }],
+  });
+  eq('crediting a line this invoice never had -> 422', foreignLine.status, 422);
+  eq(
+    'unknown credit note -> 404',
+    (await api('GET', '/api/credit-notes/CRN-0000-999')).status,
+    404
+  );
+
+  // Balance the invoice: the remaining 2 rolls at 5% plus both boxes at 18%.
+  token = adminToken;
+  const crnBRes = await api('POST', '/api/credit-notes', {
+    invoiceId: mixedInvoice.id,
+    reason: 'Full return of the remainder',
+    items: [
+      { invoiceItemId: Number(line5.id), quantity: 2 },
+      { invoiceItemId: Number(line18.id), quantity: 2 },
+    ],
+  });
+  eq('ADMIN balancing the invoice -> 201', crnBRes.status, 201);
+  const crnB = crnBRes.body?.data;
+  money('remainder taxable = 800 + 3900', crnB?.taxableAmount, 4700);
+  money('remainder tax = 40 + 702', crnB?.taxAmount, 742);
+  money('remainder value = 840 + 4602', crnB?.grandTotal, 5442);
+
+  const settled = await api('GET', `/api/invoices/${mixedInvoice.id}`);
+  money('invoice credited in full', settled.body?.data?.creditedAmount, 6282);
+  money('balance is zero', settled.body?.data?.balanceDue, 0);
+  eq('settlement reads as Paid', settled.body?.data?.paymentStatus, 'Paid');
+
+  // The register: findable by note number and by the invoice it credits.
+  const byNumber = await api('GET', `/api/credit-notes?search=${crnA.id}`);
+  eq('register finds the note by its number', byNumber.body?.data?.[0]?.id, crnA.id);
+  const byInvoice = await api('GET', `/api/credit-notes?search=${mixedInvoice.id}`);
+  check(
+    'register also searches by invoice number',
+    (byInvoice.body?.data ?? []).some((n) => n.invoiceId === mixedInvoice.id),
+    JSON.stringify((byInvoice.body?.data ?? []).map((n) => n.id))
+  );
+
+  const hsnRes = await api('GET', `/api/reports/gst-hsn?${gstWindow}`);
+  eq('GET /api/reports/gst-hsn -> 200', hsnRes.status, 200);
+  check('HSN totals keep the split identity', splitOk(hsnRes.body?.data?.totals));
+  check(
+    'HSN rows carry code and rate',
+    (hsnRes.body?.data?.hsn ?? []).every((r) => 'hsnCode' in r && 'rate' in r)
+  );
+
+  const custRes = await api('GET', `/api/reports/gst-customers?${gstWindow}`);
+  eq('GET /api/reports/gst-customers -> 200', custRes.status, 200);
+  check('customer totals keep the split identity', splitOk(custRes.body?.data?.totals));
+  const buyerGstRow = (custRes.body?.data?.customers ?? []).find((c) => c.gstin === GSTIN);
+  eq('buyer row counts both live credit notes', buyerGstRow?.creditNotes, 2);
+  check(
+    'buyer row counts its invoices',
+    Number(buyerGstRow?.invoices) >= 3,
+    String(buyerGstRow?.invoices)
+  );
+
+  // Reversal: only ADMIN (`company:write`) may unwind a note, and the undo
+  // must be exact — stock, balance and every report figure back to square one.
+  token = manager.token;
+  eq(
+    'MANAGER reversing a note -> 403',
+    (await api('DELETE', `/api/credit-notes/${crnB.id}`)).status,
+    403
+  );
+
+  token = adminToken;
+  const revB = await api('DELETE', `/api/credit-notes/${crnB.id}`);
+  eq('ADMIN reversing a note -> 200', revB.status, 200);
+  eq('reversal confirms', revB.body?.data?.deleted, true);
+  eq(
+    'reversed note is gone from reads -> 404',
+    (await api('GET', `/api/credit-notes/${crnB.id}`)).status,
+    404
+  );
+
+  const afterRevB = await api('GET', `/api/invoices/${mixedInvoice.id}`);
+  money(
+    'credited amount unwound to the first note',
+    afterRevB.body?.data?.creditedAmount,
+    840
+  );
+  money(
+    'balance re-opens by the reversed value',
+    afterRevB.body?.data?.balanceDue,
+    6282 - 840
+  );
+
+  const revA = await api('DELETE', `/api/credit-notes/${crnA.id}`);
+  eq('reversing the first note -> 200', revA.status, 200);
+
+  const afterRevA = await api('GET', `/api/invoices/${mixedInvoice.id}`);
+  money('invoice is whole again', afterRevA.body?.data?.creditedAmount, 0);
+  money('balance is the full total again', afterRevA.body?.data?.balanceDue, 6282);
+  eq('stock returns to the post-sale level', await stockOf(product.id), productStockBefore);
+  eq('paper stock returns too', await stockOf(product2.body?.data?.id), paperStockBefore);
+
+  const gstFinal = await api('GET', `/api/reports/gst-summary?${gstWindow}`);
+  money(
+    'GST totals restored exactly once every note is reversed',
+    gstFinal.body?.data?.totals?.taxableValue,
+    gstBeforeTotals?.taxableValue
+  );
+  const refundGone = await api('GET', `/api/ledger?search=${crnA.id}`);
+  check(
+    'the refund row leaves with the note',
+    !(refundGone.body?.data ?? []).some((r) => r.entryType === 'REFUND'),
+    JSON.stringify((refundGone.body?.data ?? []).map((r) => r.entryType))
+  );
+
+  // -------------------------------------------------------------------------
+  section('14. Clean up test records');
 
   // Invoices first: the customer/product deletes below refuse while an invoice
   // still references them, so the order here is load-bearing, not cosmetic.

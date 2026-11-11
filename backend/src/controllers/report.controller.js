@@ -81,4 +81,19 @@ export const reportController = {
   async receivablesAging(req, res) {
     res.json({ data: await reportService.receivablesAging() });
   },
+
+  async gstSummary(req, res) {
+    const { from, to } = vQuery(req);
+    res.json({ data: await reportService.gstSummary({ from, to }) });
+  },
+
+  async gstHsn(req, res) {
+    const { from, to } = vQuery(req);
+    res.json({ data: await reportService.gstHsnSummary({ from, to }) });
+  },
+
+  async gstCustomers(req, res) {
+    const { from, to } = vQuery(req);
+    res.json({ data: await reportService.gstCustomerSummary({ from, to }) });
+  },
 };

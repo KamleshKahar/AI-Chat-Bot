@@ -5,9 +5,9 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { FormModal } from '@/components/ui/FormModal';
 import { formatCurrency } from '@/lib/formatters';
+import { DEFAULT_GST_SLAB, GST_SLAB_OPTIONS } from '@/lib/gst';
 
 const UNITS = ['pcs', 'box', 'pack', 'rolls', 'sets', 'kg', 'litre', 'metre'];
-const TAX_RATES = [0, 5, 12, 18, 28];
 
 const EMPTY_FORM = {
   name: '',
@@ -19,7 +19,7 @@ const EMPTY_FORM = {
   stockQuantity: '',
   minStockLevel: 10,
   unit: 'pcs',
-  taxRate: 18,
+  taxRate: DEFAULT_GST_SLAB,
   description: '',
 };
 
@@ -203,7 +203,7 @@ export function ProductFormModal({ isOpen, onClose, onSubmit, initialData, categ
           label="GST / Tax Rate"
           value={form.taxRate}
           onChange={(e) => handleChange('taxRate', Number(e.target.value))}
-          options={TAX_RATES.map((r) => ({ value: r, label: `${r}%` }))}
+          options={GST_SLAB_OPTIONS}
           placeholder=""
         />
 

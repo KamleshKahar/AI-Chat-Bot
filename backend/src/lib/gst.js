@@ -13,6 +13,25 @@
  * customer's state.
  */
 
+/**
+ * The GST tax slabs this application supports, in percent.
+ *
+ * India's GST rate schedule is a short, fixed list — 0 (exempt/nil-rated),
+ * 5, 12, 18 and 28 — and every rate the system accepts must be one of them.
+ * This constant is the single source of truth: `schemas/validators.js`
+ * validates every product and invoice line rate against it, and the frontend
+ * mirrors it for its dropdowns (ProductFormModal, CreateSaleForm). A rate
+ * outside the list is either a typo or a legislative change — in both cases it
+ * must be added here deliberately, never accepted silently.
+ */
+export const GST_SLABS = [0, 5, 12, 18, 28];
+
+/** True when `rate` is one of the supported GST slabs. */
+export function isGstSlab(rate) {
+  const n = Number(rate);
+  return GST_SLABS.some((slab) => Number.isFinite(n) && n === slab);
+}
+
 /** Normalise a state name for comparison (trim, collapse spaces, casefold). */
 function normaliseState(value) {
   return String(value ?? '')

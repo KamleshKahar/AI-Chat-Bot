@@ -108,6 +108,66 @@ export const reportService = {
         .reduce((acc, r) => acc + Number(d(r.amount)), 0),
     };
   },
+
+  // -------------------------------------------------------------------------
+  // GST reports (rate-wise, HSN-wise, customer-wise) — all NET of credit notes
+  // -------------------------------------------------------------------------
+
+  /**
+   * Rate-wise output tax with a totals row folded in. The tax split on the
+   * totals row holds exactly: cgst + sgst + igst === taxAmount, because the
+   * totals are the SUM of the parts rather than a re-rounding.
+   */
+  async gstSummary(params) {
+    const rows = await reportRepo.gstSummary(params);
+    return {
+      rates: rows,
+      totals: {
+        taxableValue: sumField(rows, 'taxableValue'),
+        cgstAmount: sumField(rows, 'cgstAmount'),
+        sgstAmount: sumField(rows, 'sgstAmount'),
+        igstAmount: sumField(rows, 'igstAmount'),
+        taxAmount: sumField(rows, 'taxAmount'),
+      },
+    };
+  },
+
+  /** HSN-wise summary, plus the same totals row for the report footer. */
+  async gstHsnSummary(params) {
+    const rows = await reportRepo.gstHsnSummary(params);
+    return {
+      hsn: rows,
+      totals: {
+        taxableValue: sumField(rows, 'taxableValue'),
+        cgstAmount: sumField(rows, 'cgstAmount'),
+        sgstAmount: sumField(rows, 'sgstAmount'),
+        igstAmount: sumField(rows, 'igstAmount'),
+        taxAmount: sumField(rows, 'taxAmount'),
+      },
+    };
+  },
+
+  /** GSTIN-wise (B2B) summary with document counts, plus totals. */
+  async gstCustomerSummary(params) {
+    const rows = await reportRepo.gstCustomerSummary(params);
+    return {
+      customers: rows,
+      totals: {
+        invoices: rows.reduce((acc, r) => acc + r.invoices, 0),
+        creditNotes: rows.reduce((acc, r) => acc + r.creditNotes, 0),
+        taxableValue: sumField(rows, 'taxableValue'),
+        cgstAmount: sumField(rows, 'cgstAmount'),
+        sgstAmount: sumField(rows, 'sgstAmount'),
+        igstAmount: sumField(rows, 'igstAmount'),
+        taxAmount: sumField(rows, 'taxAmount'),
+      },
+    };
+  },
 };
+
+/** Sum a 2dp money field across already-serialized rows (values are numbers). */
+function sumField(rows, field) {
+  return Math.round(rows.reduce((acc, r) => acc + Number(d(r[field])), 0) * 100) / 100;
+}
 
 export default reportService;

@@ -38,6 +38,19 @@ describe('permission matrix', () => {
     assert.equal(can('VIEWER', PERMISSIONS.REPORT_READ), false);
   });
 
+  test('reading credit notes is open to every role that can read invoices', () => {
+    for (const role of ['ADMIN', 'MANAGER', 'CASHIER', 'VIEWER']) {
+      assert.ok(can(role, PERMISSIONS.CREDIT_NOTE_READ), `${role} should read credit notes`);
+    }
+  });
+
+  test('creating credit notes is an ADMIN/MANAGER money power', () => {
+    assert.ok(can('ADMIN', PERMISSIONS.CREDIT_NOTE_CREATE));
+    assert.ok(can('MANAGER', PERMISSIONS.CREDIT_NOTE_CREATE));
+    assert.equal(can('CASHIER', PERMISSIONS.CREDIT_NOTE_CREATE), false);
+    assert.equal(can('VIEWER', PERMISSIONS.CREDIT_NOTE_CREATE), false);
+  });
+
   test('every role can read the catalogue', () => {
     for (const role of ['ADMIN', 'MANAGER', 'CASHIER', 'VIEWER']) {
       assert.ok(can(role, PERMISSIONS.PRODUCT_READ), `${role} should read products`);

@@ -8,15 +8,63 @@ export function round2(value) {
 }
 
 /**
+ * Split `total` across `weights` so the parts sum to exactly `total`.
+ *
+ * Largest-remainder method, mirroring backend/src/lib/decimal.js#allocate:
+ * each part gets its share truncated to 2dp, then the leftover paise are
+ * handed out one at a time to the parts with the largest fractional
+ * remainder. Without this, independently-rounded line shares drift a few
+ * paise away from the invoice total — exactly the kind of drift a GST audit
+ * notices (and the server would then disagree with this preview by a paisa).
+ *
+ * The `+ 1e-9` fudge inside the floor absorbs binary floating point error
+ * (e.g. 0.07 * 100 === 7.000000000000001) so a mathematically exact share
+ * is never floored a paisa short.
+ */
+export function allocate(total, weights) {
+  const target = round2(total);
+  const n = weights.length;
+  if (n === 0) return [];
+
+  const totalWeight = weights.reduce((acc, w) => acc + Number(w || 0), 0);
+  if (totalWeight === 0) return weights.map((_, i) => (i === 0 ? target : 0));
+
+  const exact = weights.map((w) => (target * Number(w)) / totalWeight);
+  const floored = exact.map((v) => Math.floor(v * 100 + 1e-9) / 100);
+
+  const assigned = round2(floored.reduce((acc, v) => acc + v, 0));
+  let leftover = Math.round((target - assigned) * 100); // whole paise
+
+  const order = exact
+    .map((v, i) => ({ i, frac: v - floored[i] }))
+    .sort((a, b) => b.frac - a.frac || a.i - b.i);
+
+  const result = floored.slice();
+  let cursor = 0;
+  while (leftover > 0 && order.length > 0) {
+    result[order[cursor % order.length].i] = round2(result[order[cursor % order.length].i] + 0.01);
+    leftover -= 1;
+    cursor += 1;
+  }
+  return result;
+}
+
+/**
  * Calculate the complete billing summary for a sale
  *
- * Formula:
+ * Formula (mirrors backend/src/lib/billing.js#computeInvoiceTotals exactly):
  *   lineAmount          = quantity * unitPrice
  *   subtotal            = sum(lineAmount)
  *   discountAmount      = discountType === 'percent' ? subtotal * percent/100 : flat amount
+ *   lineDiscount        = the line's proportional share of discountAmount
+ *   lineTaxable         = lineAmount - lineDiscount
+ *   lineTax             = lineTaxable * lineTaxRate / 100   (each line's OWN slab)
+ *   taxAmount           = sum(lineTax)
  *   taxableAmount       = subtotal - discountAmount
- *   taxAmount           = taxableAmount * taxRate / 100
- *   grandTotal          = taxableAmount + taxAmount
+ *   grandTotal          = taxableAmount + taxAmount + shippingCharges
+ *
+ * Tax is per line because an invoice may mix slabs (12% + 18%); the
+ * invoice-level `taxRate` is only the fallback for lines without a rate.
  */
 export function calculateSaleTotals({
   items = [],
@@ -29,7 +77,10 @@ export function calculateSaleTotals({
     const quantity = Number(item.quantity || 0);
     const unitPrice = Number(item.unitPrice || 0);
     const lineAmount = round2(quantity * unitPrice);
-    return { ...item, quantity, unitPrice, lineAmount };
+    // Per-line GST slab. `??` keeps an explicit 0% (a valid slab) intact and
+    // falls back only when no rate was supplied at all.
+    const lineRate = Number(item.taxRate ?? taxRate ?? 0);
+    return { ...item, quantity, unitPrice, lineAmount, taxRate: lineRate };
   });
 
   const subtotal = round2(lineItems.reduce((acc, item) => acc + item.lineAmount, 0));
@@ -45,12 +96,28 @@ export function calculateSaleTotals({
 
   const taxableAmount = round2(subtotal - discountAmount);
   const numericTaxRate = Number(taxRate || 0);
-  const taxAmount = round2((taxableAmount * numericTaxRate) / 100);
+
+  // Allocate the invoice discount across lines, then tax each line at its own
+  // slab on its discounted (taxable) value.
+  const lineDiscounts = allocate(discountAmount, lineItems.map((i) => i.lineAmount));
+  const lineTaxes = lineItems.map((item, i) => {
+    const lineTaxable = round2(item.lineAmount - lineDiscounts[i]);
+    return round2((lineTaxable * item.taxRate) / 100);
+  });
+  const taxAmount = round2(lineTaxes.reduce((acc, t) => acc + t, 0));
+
   const shipping = round2(Number(shippingCharges || 0));
   const grandTotal = round2(taxableAmount + taxAmount + shipping);
 
+  const enriched = lineItems.map((item, i) => ({
+    ...item,
+    discountAmount: lineDiscounts[i],
+    taxableValue: round2(item.lineAmount - lineDiscounts[i]),
+    taxAmount: lineTaxes[i],
+  }));
+
   return {
-    lineItems,
+    lineItems: enriched,
     subtotal,
     discountType,
     discountValue: numericDiscount,
@@ -61,6 +128,83 @@ export function calculateSaleTotals({
     shippingCharges: shipping,
     grandTotal,
     totalItems: lineItems.reduce((acc, item) => acc + item.quantity, 0),
+  };
+}
+
+/**
+ * Preview the money a credit note would return for the given invoice lines.
+ *
+ * Mirrors backend/src/lib/billing.js#computeCreditNoteTotals: a credit note
+ * never re-prices anything — unit price, GST slab and share of the original
+ * line discount all come from the STORED invoice line, so the payload can
+ * only say how many units are coming back. Crediting every unit reproduces
+ * the invoice's own totals (except shipping, which a return does not
+ * re-charge). The server recomputes authoritatively; this is the live
+ * preview shown while picking quantities.
+ *
+ * @param {Array<object>} items invoice items (quantity, unitPrice,
+ *   discountAmount, taxRate) each with `creditedQuantity` (0 = not credited)
+ * @param {'CGST_SGST'|'IGST'} taxType copied from the invoice
+ */
+export function computeCreditNoteTotals({ items = [], taxType = 'CGST_SGST' }) {
+  const isInterState = taxType === 'IGST';
+
+  const lines = items
+    .map((item) => {
+      const invoiced = Number(item.quantity || 0);
+      const credited = Number(item.creditedQuantity || 0);
+      if (credited <= 0) return null;
+
+      const unitPrice = Number(item.unitPrice || 0);
+      const rate = Number(item.taxRate || 0);
+      const lineAmount = round2(credited * unitPrice);
+      const discountAmount = invoiced > 0
+        ? round2((Number(item.discountAmount || 0) * credited) / invoiced)
+        : 0;
+      const taxableValue = round2(lineAmount - discountAmount);
+      const lineTax = round2((taxableValue * rate) / 100);
+
+      const cgst = isInterState ? 0 : Math.floor((lineTax / 2) * 100 + 1e-9) / 100;
+      const sgst = isInterState ? 0 : round2(lineTax - cgst);
+      const igst = isInterState ? lineTax : 0;
+
+      return {
+        invoiceItemId: item.id ?? item.invoiceItemId ?? null,
+        productName: item.productName ?? item.name ?? '',
+        sku: item.sku ?? '',
+        hsnCode: item.hsnCode ?? null,
+        quantity: credited,
+        invoicedQuantity: invoiced,
+        unitPrice: round2(unitPrice),
+        lineAmount,
+        discountAmount,
+        taxableValue,
+        taxRate: rate,
+        lineTax,
+        cgstAmount: cgst,
+        sgstAmount: sgst,
+        igstAmount: igst,
+        lineTotal: taxableValue,
+      };
+    })
+    .filter(Boolean);
+
+  const sum = (fn) => round2(lines.reduce((acc, l) => acc + fn(l), 0));
+  const taxableAmount = sum((l) => l.taxableValue);
+  const taxAmount = sum((l) => l.lineTax);
+
+  return {
+    lines,
+    subtotal: sum((l) => l.lineAmount),
+    discountAmount: sum((l) => l.discountAmount),
+    taxableAmount,
+    taxType: isInterState ? 'IGST' : 'CGST_SGST',
+    taxAmount,
+    cgstAmount: sum((l) => l.cgstAmount),
+    sgstAmount: sum((l) => l.sgstAmount),
+    igstAmount: sum((l) => l.igstAmount),
+    grandTotal: round2(taxableAmount + taxAmount),
+    totalItems: lines.reduce((acc, l) => acc + l.quantity, 0),
   };
 }
 

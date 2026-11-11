@@ -56,5 +56,10 @@ reports.get('/customer-performance', ...withRange(reportController.customerPerfo
 reports.get('/cash-flow', ...withRange(reportController.cashFlow));
 reports.get('/receivables-aging', asyncHandler(reportController.receivablesAging));
 
+// GST returns (all net of credit notes within the window).
+reports.get('/gst-summary', ...withRange(reportController.gstSummary));
+reports.get('/gst-hsn', ...withRange(reportController.gstHsn));
+reports.get('/gst-customers', ...withRange(reportController.gstCustomers));
+
 export { dashboard, ledger, reports };
 export default reports;

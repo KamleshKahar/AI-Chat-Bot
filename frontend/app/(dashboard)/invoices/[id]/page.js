@@ -14,23 +14,28 @@ import {
   Hash,
   CalendarClock,
   IndianRupee,
+  RotateCcw,
 } from 'lucide-react';
 import { useData } from '@/context/DataContext';
 import { useToast } from '@/context/ToastContext';
+import { useAuth } from '@/context/AuthContext';
 import { useServerResource } from '@/hooks/useServerQuery';
 import { formatCurrency, formatDate } from '@/lib/formatters';
 import { Button } from '@/components/ui/Button';
 import { StatusBadge } from '@/components/ui/Badge';
 import { PrintableInvoice } from '@/components/invoices/PrintableInvoice';
 import { RecordPaymentModal } from '@/components/invoices/RecordPaymentModal';
+import { CreateCreditNoteModal } from '@/components/credit-notes/CreateCreditNoteModal';
 import { EmptyState, LoadingSpinner } from '@/components/ui/StateFeedback';
 
 export default function InvoiceDetailPage() {
   const { id } = useParams();
   const router = useRouter();
-  const { updateInvoicePayment, revision } = useData();
+  const { updateInvoicePayment, createCreditNote, revision } = useData();
+  const { can } = useAuth();
   const { error } = useToast();
   const [paymentOpen, setPaymentOpen] = useState(false);
+  const [creditOpen, setCreditOpen] = useState(false);
 
   /*
     The invoice is fetched by id rather than looked up in a client-side array.
@@ -102,6 +107,11 @@ export default function InvoiceDetailPage() {
               Record Payment
             </Button>
           )}
+          {can('creditNote:create') && (
+            <Button variant="outline" icon={RotateCcw} onClick={() => setCreditOpen(true)}>
+              Create Credit Note
+            </Button>
+          )}
           <Button variant="outline" icon={Printer} onClick={() => window.print()}>
             Print Invoice
           </Button>
@@ -115,6 +125,11 @@ export default function InvoiceDetailPage() {
             Invoice Total
           </p>
           <p className="mt-1.5 text-xl font-bold text-slate-900">{formatCurrency(invoice.grandTotal)}</p>
+          {Number(invoice.creditedAmount || 0) > 0 && (
+            <p className="text-[11px] text-rose-600 font-semibold mt-0.5">
+              {formatCurrency(invoice.creditedAmount)} credited back
+            </p>
+          )}
         </div>
         <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-2xs">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
@@ -133,6 +148,11 @@ export default function InvoiceDetailPage() {
           >
             {formatCurrency(invoice.balanceDue)}
           </p>
+          {Number(invoice.creditedAmount || 0) > 0 && (
+            <p className="text-[11px] text-slate-400 mt-0.5">
+              After {formatCurrency(invoice.creditedAmount)} in credit notes
+            </p>
+          )}
         </div>
         <div className="rounded-xl border border-slate-200/80 bg-white p-4 shadow-2xs">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Due Date</p>
@@ -215,12 +235,40 @@ export default function InvoiceDetailPage() {
             </Link>
           </div>
         )}
+
+        {Number(invoice.creditedAmount || 0) > 0 && (
+          <div className="mt-5 pt-4 border-t border-slate-100">
+            <Link
+              href={`/credit-notes?search=${encodeURIComponent(invoice.id)}`}
+              className="text-xs font-semibold text-rose-600 hover:text-rose-700"
+            >
+              {formatCurrency(invoice.creditedAmount)} reversed via credit notes &rarr;
+            </Link>
+          </div>
+        )}
       </div>
 
       {/* Printable invoice */}
       <div className="print-area">
         <PrintableInvoice invoice={invoice} />
       </div>
+
+      <CreateCreditNoteModal
+        isOpen={creditOpen}
+        onClose={() => setCreditOpen(false)}
+        invoice={invoice}
+        onSubmit={async (payload) => {
+          try {
+            await createCreditNote(invoice.id, payload);
+            return true;
+          } catch (err) {
+            // Keep the dialog open: a 422 (e.g. "only 2 units remain
+            // returnable") means nothing was written and the picker is stale.
+            error(err.message || 'Could not issue the credit note.');
+            return false;
+          }
+        }}
+      />
 
       <RecordPaymentModal
         isOpen={paymentOpen}

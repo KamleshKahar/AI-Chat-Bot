@@ -17,6 +17,7 @@ import {
   CustomerSchema,
   SaleSchema,
   InvoiceSchema,
+  CreditNoteSchema,
   TransactionSchema,
   DashboardSummarySchema,
   RevenuePointSchema,
@@ -502,6 +503,51 @@ function generateDocument() {
     responses: { 200: jsonResponse('Cancelled', z.object({ id: z.string(), deleted: z.boolean() })) },
   });
 
+  // ---- credit notes -------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/credit-notes',
+    tags: ['Credit Notes'],
+    summary: 'Paginated credit-note list',
+    security: BEARER,
+    request: { query: z.object({ ...V.creditNoteListQuerySchema.shape, ...PagingQuery.shape }) },
+    responses: { 200: jsonResponse('Credit notes', listEnvelope(CreditNoteSchema)) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/credit-notes/{id}',
+    tags: ['Credit Notes'],
+    summary: 'Credit-note detail (prints straight from this payload)',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'CRN-2026-001' }) }) },
+    responses: { 200: jsonResponse('Credit note', z.object({ data: CreditNoteSchema })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/credit-notes',
+    tags: ['Credit Notes'],
+    summary: 'Issue a credit note against an invoice (ADMIN/MANAGER)',
+    description:
+      'The payload only chooses lines and quantities — prices, GST slabs and discounts are read from the stored invoice. Issues stock RETURN movements, a REFUND ledger entry and reduces the invoice balance, all in one transaction. Crediting every unit reproduces the invoice totals exactly.',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.createCreditNoteSchema } } } },
+    responses: { 201: jsonResponse('Credit note issued', z.object({ data: CreditNoteSchema })) },
+  });
+
+  registerRoute({
+    method: 'delete',
+    path: '/api/credit-notes/{id}',
+    tags: ['Credit Notes'],
+    summary: 'Delete a credit note — full reversal (ADMIN only)',
+    description:
+      'Unwinds every effect of issuing: stock goes back down, the refund ledger row is removed, the invoice credit shrinks, and the note is soft-deleted. Refuses with 409 if the returned stock has since been sold.',
+    security: BEARER,
+    request: { params: z.object({ id: z.string().openapi({ example: 'CRN-2026-001' }) }) },
+    responses: { 200: jsonResponse('Reversed', z.object({ id: z.string(), deleted: z.boolean() })) },
+  });
+
   // ---- dashboard ----------------------------------------------------------
   registerRoute({
     method: 'get',
@@ -624,6 +670,36 @@ function generateDocument() {
     responses: { 200: jsonResponse('Aging', z.object({ data: z.any() })) },
   });
 
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/gst-summary',
+    tags: ['Reports'],
+    summary: 'Rate-wise output GST, split intra-/inter-state (net of credit notes)',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('GST summary', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/gst-hsn',
+    tags: ['Reports'],
+    summary: 'HSN-wise taxable value and tax (net of credit notes)',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('HSN summary', z.object({ data: z.any() })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/reports/gst-customers',
+    tags: ['Reports'],
+    summary: 'GSTIN-wise B2B output tax (net of credit notes)',
+    security: BEARER,
+    request: { query: DateRangeQuery },
+    responses: { 200: jsonResponse('Customer GST summary', z.object({ data: z.any() })) },
+  });
+
   const generator = new OpenApiGeneratorV31(registry.definitions);
 
   return generator.generateDocument({
@@ -659,6 +735,7 @@ function generateDocument() {
       { name: 'Customers', description: 'Customer records' },
       { name: 'Sales', description: 'Point-of-sale transactions' },
       { name: 'Invoices', description: 'Invoice documents and payments' },
+      { name: 'Credit Notes', description: 'Return documents issued against invoices' },
       { name: 'Dashboard', description: 'Dashboard aggregates' },
       { name: 'Ledger', description: 'Cash movement history' },
       { name: 'Reports', description: 'Aggregated reporting' },
