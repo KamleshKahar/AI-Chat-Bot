@@ -25,6 +25,7 @@ import { FilterChip } from '@/components/ui/SearchInput';
 import { LineChart, BarChart, DonutChart, ProgressBar } from '@/components/reports/Charts';
 import { StatusBadge } from '@/components/ui/Badge';
 import { EmptyState } from '@/components/ui/StateFeedback';
+import { RequirePermission } from '@/components/auth/RequirePermission';
 
 const PER_PAGE = 10;
 
@@ -52,8 +53,20 @@ function daysAgo(n) {
  * So `lib/salesLogic.js`'s aggregation helpers now have no callers in the app.
  * They are left in place because `scripts/verify.mjs` still pins the billing
  * maths against them, which is the contract `backend/src/lib/billing.js` mirrors.
+ *
+ * Gated on `report:read` — ADMIN and MANAGER only, matching the API. The backend
+ * would 403 the queries regardless; the gate just replaces a screen of error
+ * toasts with one clear explanation.
  */
 export default function ReportsPage() {
+  return (
+    <RequirePermission permission="report:read">
+      <ReportsPageInner />
+    </RequirePermission>
+  );
+}
+
+function ReportsPageInner() {
   const { revision } = useData();
 
   const [toDate, setToDate] = useState(() => daysAgo(0));

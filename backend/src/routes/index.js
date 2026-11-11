@@ -1,12 +1,12 @@
 import { Router } from 'express';
 import authRoutes from './auth.routes.js';
+import userRoutes from './user.routes.js';
 import companyRoutes from './company.routes.js';
 import categoryRoutes from './category.routes.js';
 import productRoutes from './product.routes.js';
 import customerRoutes from './customer.routes.js';
 import saleRoutes from './sale.routes.js';
 import invoiceRoutes from './invoice.routes.js';
-import seedRoutes from './seed.routes.js';
 import { dashboard, ledger, reports } from './report.routes.js';
 import { asyncHandler } from '../errors/asyncHandler.js';
 import { prisma } from '../config/prisma.js';
@@ -35,6 +35,7 @@ router.get(
 );
 
 router.use('/auth', authRoutes);
+router.use('/users', userRoutes);
 router.use('/company', companyRoutes);
 router.use('/categories', categoryRoutes);
 router.use('/products', productRoutes);
@@ -44,6 +45,5 @@ router.use('/invoices', invoiceRoutes);
 router.use('/dashboard', dashboard);
 router.use('/ledger', ledger);
 router.use('/reports', reports);
-router.use('/seed', seedRoutes);
 
 export default router;

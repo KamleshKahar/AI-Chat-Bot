@@ -7,6 +7,7 @@ import {
   toPaymentMethodLabel,
   toPaymentStatusLabel,
 } from '../lib/enums.js';
+import { permissionsFor } from '../middleware/roles.js';
 
 /**
  * Serializers: database row -> the exact JSON shape the FlowPilot frontend
@@ -380,5 +381,13 @@ export function serializeUser(row) {
     phone: row.phone ?? null,
     isActive: row.isActive,
     lastLoginAt: row.lastLoginAt ?? null,
+    createdAt: row.createdAt ? new Date(row.createdAt).toISOString() : null,
+    /*
+     * The frontend gates its UI (sidebar entries, action buttons) from this
+     * list, so the permission matrix has exactly one home: `middleware/roles.js`.
+     * The backend re-derives permissions from the DB-backed role on every
+     * request regardless — this array is a rendering hint, never the gate.
+     */
+    permissions: permissionsFor(row.role),
   };
 }

@@ -28,7 +28,7 @@ export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 8;
  * `me()` 401 that `/login` legitimately produces as a dead session and
  * navigated back to `/login`, remounting the root layout and looping forever.
  */
-export const PUBLIC_PATHS = new Set(['/login']);
+export const PUBLIC_PATHS = new Set(['/login', '/setup']);
 
 /** True when `pathname` is reachable without a session. */
 export function isPublicPath(pathname) {

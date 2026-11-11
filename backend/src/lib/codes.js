@@ -1,5 +1,3 @@
-import { prisma } from '../config/prisma.js';
-
 /**
  * Human-readable document codes.
  *
@@ -65,30 +63,4 @@ export async function nextCode(tx, spec) {
   // Invoice codes embed the year, everything else does not.
   if (prefix === 'INV') return `${prefix}-${period}-${pad(next, width)}`;
   return `${prefix}${pad(next, width)}`;
-}
-
-/** Allocate N codes at once (used when seeding). */
-export async function nextCodes(tx, spec, count) {
-  const out = [];
-  for (let i = 0; i < count; i += 1) out.push(await nextCode(tx, spec));
-  return out;
-}
-
-/**
- * Force a sequence to at least `value`. Used by the seeder so the demo dataset
- * keeps its original identifiers (PRD-101 … PRD-112) and new records continue
- * from there instead of colliding.
- */
-export async function bumpSequence(tx, spec, value) {
-  const { prefix, period } = spec;
-  await tx.documentSequence.upsert({
-    where: { prefix_period: { prefix, period } },
-    create: { prefix, period, lastNumber: value },
-    update: { lastNumber: Math.max(value, value) },
-  });
-}
-
-/** Read every counter — used by the seeder to plan code allocation. */
-export async function readSequences() {
-  return prisma.documentSequence.findMany();
 }

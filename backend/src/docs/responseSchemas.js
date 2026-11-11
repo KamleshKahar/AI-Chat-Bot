@@ -18,6 +18,10 @@ export const UserSchema = z
     phone: z.string().nullable(),
     isActive: z.boolean(),
     lastLoginAt: z.string().nullable(),
+    createdAt: z.string().nullable(),
+    // Rendering hint for the frontend's role gating; the backend re-derives
+    // permissions from the role on every request.
+    permissions: z.array(z.string()).openapi({ example: ['user:read', 'product:write'] }),
   })
   .openapi('User');
 

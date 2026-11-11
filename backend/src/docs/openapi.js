@@ -66,6 +66,33 @@ function generateDocument() {
   });
 
   // ---- auth ---------------------------------------------------------------
+  const SetupResponseSchema = z.object({
+    data: z.object({ token: z.string(), user: UserSchema }),
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/auth/setup-status',
+    tags: ['Auth'],
+    summary: 'Whether the first-run setup wizard must be completed',
+    security: null,
+    responses: {
+      200: jsonResponse('Setup status', z.object({ data: z.object({ needsSetup: z.boolean() }) })),
+    },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/auth/setup',
+    tags: ['Auth'],
+    summary: 'First-run setup: create the initial ADMIN account',
+    description:
+      'Only succeeds while the users table is empty; answers 409 once any account exists.',
+    security: null,
+    request: { body: { content: { 'application/json': { schema: V.setupSchema } } } },
+    responses: { 201: jsonResponse('Initial admin created and signed in', SetupResponseSchema) },
+  });
+
   registerRoute({
     method: 'post',
     path: '/api/auth/login',
@@ -102,6 +129,78 @@ function generateDocument() {
     security: BEARER,
     request: { body: { content: { 'application/json': { schema: V.changePasswordSchema } } } },
     responses: { 200: jsonResponse('Password changed', z.object({ data: z.object({ success: z.boolean() }) })) },
+  });
+
+  // ---- users --------------------------------------------------------------
+  registerRoute({
+    method: 'get',
+    path: '/api/users',
+    tags: ['Users'],
+    summary: 'List user accounts (ADMIN only)',
+    security: BEARER,
+    request: { query: z.object({ ...V.userListQuerySchema.shape, ...PagingQuery.shape }) },
+    responses: {
+      200: jsonResponse('Paged users', listEnvelope(UserSchema)),
+    },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/users',
+    tags: ['Users'],
+    summary: 'Create a user account (ADMIN only)',
+    security: BEARER,
+    request: { body: { content: { 'application/json': { schema: V.createUserSchema } } } },
+    responses: { 201: jsonResponse('User created', z.object({ data: UserSchema })) },
+  });
+
+  registerRoute({
+    method: 'get',
+    path: '/api/users/{id}',
+    tags: ['Users'],
+    summary: 'User detail (ADMIN only)',
+    security: BEARER,
+    request: { params: z.object({ id: z.string() }) },
+    responses: { 200: jsonResponse('User', z.object({ data: UserSchema })) },
+  });
+
+  registerRoute({
+    method: 'patch',
+    path: '/api/users/{id}',
+    tags: ['Users'],
+    summary: 'Update name / phone / role / active flag (ADMIN only)',
+    description:
+      'Refuses to change the caller\'s own role or status, and refuses to demote or deactivate the last active administrator.',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string() }),
+      body: { content: { 'application/json': { schema: V.updateUserSchema } } },
+    },
+    responses: { 200: jsonResponse('Updated user', z.object({ data: UserSchema })) },
+  });
+
+  registerRoute({
+    method: 'post',
+    path: '/api/users/{id}/reset-password',
+    tags: ['Users'],
+    summary: 'Reset a user\'s password (ADMIN only)',
+    description:
+      'Omit `newPassword` to have the server generate a temporary one — it is returned once and never stored in plain text.',
+    security: BEARER,
+    request: {
+      params: z.object({ id: z.string() }),
+      body: { content: { 'application/json': { schema: V.resetPasswordSchema } } },
+    },
+    responses: {
+      200: jsonResponse('Password reset', z.object({
+        data: z.object({
+          id: z.string(),
+          email: z.string(),
+          generated: z.boolean(),
+          tempPassword: z.string().nullable(),
+        }),
+      })),
+    },
   });
 
   // ---- company ------------------------------------------------------------

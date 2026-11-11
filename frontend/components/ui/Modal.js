@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 
 export function Modal({ isOpen, onClose, title, description, children, size = 'md', maxWidth }) {
@@ -32,7 +33,25 @@ export function Modal({ isOpen, onClose, title, description, children, size = 'm
     full: 'max-w-7xl',
   };
 
-  return (
+  /**
+   * Render at `document.body` rather than in place.
+   *
+   * A `position: fixed` element is measured against its nearest ancestor that
+   * creates a containing block — a `backdrop-filter` (the header's
+   * `backdrop-blur-xs`) or a `transform` does exactly that — and it inherits
+   * that ancestor's stacking context, so its own `z-50` is capped by the
+   * ancestor's z-index. The change-password modal lives inside the sticky
+   * `z-30` header, which left it confined to a 64px strip at the top and
+   * painted *behind* page content. Portaling to the body removes both traps
+   * for every modal, wherever a caller mounts it.
+   *
+   * The modal is always closed during SSR (it only opens from user
+   * interaction), so there is no document to portal into server-side and no
+   * hydration mismatch from returning null there.
+   */
+  if (typeof document === 'undefined') return null;
+
+  return createPortal(
     <div className="fixed inset-0 z-50 overflow-y-auto">
       {/* Backdrop */}
       <div
@@ -64,6 +83,7 @@ export function Modal({ isOpen, onClose, title, description, children, size = 'm
           <div className="px-6 py-5 max-h-[calc(85vh-120px)] overflow-y-auto">{children}</div>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

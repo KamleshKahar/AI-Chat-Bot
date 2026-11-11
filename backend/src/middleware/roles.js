@@ -3,15 +3,20 @@ import { AppError } from '../errors/AppError.js';
 /**
  * Role-based access control.
  *
- * The frontend's demo build ships a single "Store Administrator" account, so
- * roles are invisible today — but every mutating route is already permission
- * gated, which means adding a staff login later is a data change, not a refactor.
+ * Multi-user by design: accounts are created by an administrator from the
+ * `/users` screen, every mutating route is permission gated, and the frontend
+ * renders from the same matrix (the `permissions` array on `/auth/me` is
+ * computed here), so the UI and the API can never disagree about what a role
+ * may do.
  */
 
 /** Every permission the API understands. */
 export const PERMISSIONS = {
   COMPANY_READ: 'company:read',
   COMPANY_WRITE: 'company:write',
+
+  USER_READ: 'user:read',
+  USER_WRITE: 'user:write',
 
   CATEGORY_READ: 'category:read',
   CATEGORY_WRITE: 'category:write',
@@ -35,8 +40,6 @@ export const PERMISSIONS = {
   REPORT_READ: 'report:read',
   LEDGER_READ: 'ledger:read',
   DASHBOARD_READ: 'dashboard:read',
-
-  SEED_RESET: 'seed:reset',
 };
 
 const READ_ONLY = [
@@ -99,10 +102,12 @@ export function requirePermission(...required) {
 
     if (missing.length > 0) {
       return next(
-        AppError.forbidden(
-          `Role ${req.user?.role ?? 'unknown'} is not permitted to perform this action`,
-          { required, missing }
-        )
+        AppError.forbidden(`Role ${req.user?.role ?? 'unknown'} is not permitted to perform this action`, {
+          // `AppError` only reads `code` and `details` from its options, so the
+          // diagnostic has to ride in `details` — passing `{ required, missing }`
+          // straight through would have it destructured into two unused locals.
+          details: { required, missing },
+        })
       );
     }
     return next();

@@ -2,22 +2,32 @@
  * End-to-end acceptance test.
  *
  * Exercises the full contract against a running server:
- *   auth -> catalogue CRUD -> customer CRUD -> sale (with authoritative totals
- *   and stock movement) -> partial payment -> final payment -> derived Overdue
- *   -> all reports -> concurrency (two overselling sales, exactly one wins)
- *   -> soft delete -> validation failures -> error envelope shape
+ *   first-run setup -> auth -> user administration -> catalogue CRUD ->
+ *   customer CRUD -> sale (with authoritative totals and stock movement) ->
+ *   partial payment -> final payment -> derived Overdue -> all reports ->
+ *   concurrency (two overselling sales, exactly one wins) -> soft delete ->
+ *   validation failures -> error envelope shape
  *
- * Run against a freshly seeded database:
- *   npm run seed && npm start          # in one shell
- *   npm run smoke-test                 # in another
+ * Self-bootstrapping — no seed step exists any more:
+ *   npm start                     # in one shell
+ *   npm run smoke-test            # in another
+ *
+ * On an empty database it runs the first-run setup (creating the admin and the
+ * company letterhead); on an existing one it signs in with SMOKE_ADMIN_EMAIL /
+ * SMOKE_ADMIN_PASSWORD. It creates its own role accounts, measures the
+ * invoice/product baselines up front, and restores those baselines by the end,
+ * so it is re-runnable against any database.
  *
  * Exits non-zero on the first failed expectation.
  */
 import 'dotenv/config';
 
 const BASE = process.env.SMOKE_BASE_URL ?? `http://localhost:${process.env.PORT ?? 4000}`;
-const ADMIN_EMAIL = process.env.SEED_ADMIN_EMAIL ?? 'admin@flowpilot.in';
-const ADMIN_PASSWORD = process.env.SEED_ADMIN_PASSWORD ?? 'flowpilot123';
+const ADMIN_EMAIL = process.env.SMOKE_ADMIN_EMAIL ?? 'admin@flowpilot.in';
+const ADMIN_PASSWORD = process.env.SMOKE_ADMIN_PASSWORD ?? 'flowpilot123';
+
+/** Password for the MANAGER/CASHIER/VIEWER accounts this run creates. */
+const ROLE_PASSWORD = 'SmokeTest-1234';
 
 let passed = 0;
 let failed = 0;
@@ -48,10 +58,20 @@ const GSTIN = `27AAAAA${RUN}1Z`;
  * Every invoice this run creates, so section 13 can soft-delete them again.
  * Sales are the only thing this test writes that has no natural cascade
  * cleanup: a soft-deleted customer/product does not remove the invoices that
- * referenced it, so without this the seeded dataset grows by ~6 invoices and
- * ~8 ledger rows on every run and the report assertions drift.
+ * referenced it, so without this the dataset grows by ~6 invoices and ~8 ledger
+ * rows on every run and the report assertions drift.
  */
 const createdInvoices = new Set();
+
+/** Role accounts this run creates, deactivated again in section 13. */
+const createdUsers = new Set();
+
+/**
+ * Invoice/product totals measured before this run writes anything. Section 13
+ * asserts the numbers return to these values — without a seed step there is no
+ * fixed baseline to compare against, only "what was there when we started".
+ */
+const baseline = { invoices: 0, products: 0 };
 
 /** Records the invoice id from a successful sale response, if present. */
 function trackInvoice(res) {
@@ -146,11 +166,51 @@ async function run() {
   );
   check('no stack trace leaked', !JSON.stringify(badLogin.body).includes('at '));
 
-  const login = await api('POST', '/api/auth/login', {
-    email: ADMIN_EMAIL,
-    password: ADMIN_PASSWORD,
-  });
-  eq('login -> 200', login.status, 200);
+  // Bootstrap: first run on an empty database performs the first-run setup;
+  // otherwise sign in with the existing administrator.
+  const setupStatus = await api('GET', '/api/auth/setup-status');
+  eq('GET /api/auth/setup-status -> 200', setupStatus.status, 200);
+  check(
+    'setup status reports a boolean',
+    typeof setupStatus.body?.data?.needsSetup === 'boolean',
+    JSON.stringify(setupStatus.body)
+  );
+
+  let login;
+  if (setupStatus.body?.data?.needsSetup) {
+    const setup = await api('POST', '/api/auth/setup', {
+      name: 'Smoke Test Admin',
+      email: ADMIN_EMAIL,
+      password: ADMIN_PASSWORD,
+      // The GST cases below need a deterministic intra-state company.
+      company: {
+        name: 'FlowPilot Solutions Pvt Ltd',
+        state: 'Maharashtra',
+        invoicePrefix: 'INV',
+      },
+    });
+    eq('first-run setup -> 201', setup.status, 201);
+    eq('setup creates an ADMIN', setup.body?.data?.user?.role, 'ADMIN');
+    // Setup closes itself: a second attempt must refuse.
+    const again = await api('POST', '/api/auth/setup', {
+      name: 'Second Admin', email: 'second@smoketest.in', password: ADMIN_PASSWORD,
+    });
+    eq('setup after completion -> 409', again.status, 409);
+    login = setup;
+  } else {
+    login = await api('POST', '/api/auth/login', {
+      email: ADMIN_EMAIL,
+      password: ADMIN_PASSWORD,
+    });
+    eq('login -> 200', login.status, 200);
+    if (login.status !== 200) {
+      throw new Error(
+        `could not sign in as ${ADMIN_EMAIL} (HTTP ${login.status}): ` +
+          `${JSON.stringify(login.body)}\n` +
+          'Set SMOKE_ADMIN_EMAIL / SMOKE_ADMIN_PASSWORD to an existing administrator.'
+      );
+    }
+  }
   // Every success response uses the `{ data, meta }` envelope, auth included.
   check('login is wrapped in data', typeof login.body?.data === 'object' && login.body.data !== null);
   check(
@@ -158,6 +218,12 @@ async function run() {
     typeof login.body?.data?.token === 'string' && login.body.data.token.length > 20
   );
   eq('login returns role ADMIN', login.body?.data?.user?.role, 'ADMIN');
+  check(
+    'admin payload carries the permission list',
+    Array.isArray(login.body?.data?.user?.permissions) &&
+      login.body.data.user.permissions.includes('user:read'),
+    JSON.stringify(login.body?.data?.user?.permissions)
+  );
   token = login.body.data.token;
 
   const noToken = await fetch(`${BASE}/api/products`);
@@ -171,6 +237,14 @@ async function run() {
   const me = await api('GET', '/api/auth/me');
   eq('GET /api/auth/me -> 200', me.status, 200);
   eq('me.email matches', me.body?.data?.email, ADMIN_EMAIL);
+  check('me carries permissions', Array.isArray(me.body?.data?.permissions));
+
+  // Measure the dataset before this run writes anything (section 13 restores it).
+  const baseInv = await api('GET', '/api/invoices?limit=1');
+  baseline.invoices = baseInv.body?.meta?.total ?? 0;
+  const baseProd = await api('GET', '/api/products?limit=1');
+  baseline.products = baseProd.body?.meta?.total ?? 0;
+  console.log(`  baseline: ${baseline.invoices} invoices, ${baseline.products} products`);
 
   // -------------------------------------------------------------------------
   section('2. Company profile');
@@ -185,11 +259,10 @@ async function run() {
 
   const categories = await api('GET', '/api/categories');
   eq('GET /api/categories -> 200', categories.status, 200);
-  check('categories seeded', (categories.body?.data?.length ?? 0) >= 6);
   check(
-    'category id is the human code',
-    categories.body?.data?.some((c) => c.id === 'CAT-01' && c.code === 'CAT-01'),
-    JSON.stringify(categories.body?.data?.[0])
+    'category list carries meta',
+    typeof categories.body?.meta?.total === 'number',
+    JSON.stringify(categories.body?.meta)
   );
   // Categories are unpaginated by design but still carry `meta`, so the frontend
   // can read every list endpoint through one code path.
@@ -198,7 +271,6 @@ async function run() {
     categories.body?.meta?.total,
     categories.body?.data?.length
   );
-  eq('categories meta.totalPages is 1 (unpaginated)', categories.body?.meta?.totalPages, 1);
 
   const newCategory = await api('POST', '/api/categories', {
     name: `Smoke Test Consumables ${RUN}`,
@@ -207,6 +279,12 @@ async function run() {
   eq('POST /api/categories -> 201', newCategory.status, 201);
   check('new category gets a CAT- code', /^CAT-\d+$/.test(newCategory.body?.data?.id ?? ''));
   const categoryId = newCategory.body?.data?.id;
+  const categoriesAfter = await api('GET', '/api/categories');
+  eq(
+    'unpaginated list reports totalPages 1 once it holds a row',
+    categoriesAfter.body?.meta?.totalPages,
+    1
+  );
 
   // Same name, same run: must still be a 409, which proves the uniqueness guard
   // is live rather than merely untested.
@@ -375,12 +453,23 @@ async function run() {
   // -------------------------------------------------------------------------
   section('6. Sales: totals, stock and trust boundary');
 
+  // A second product so the multi-line totals below do not depend on any
+  // pre-existing catalogue row (there is no seed any more).
+  const product2 = await api('POST', '/api/products', {
+    name: `Smoke Test Thermal Paper ${RUN}`,
+    sku: `SMOKE-PAPER-${RUN}`,
+    category: categoryId,
+    mrp: 2400, sellingPrice: 1950, costPrice: 1300,
+    taxRate: 18, stockQuantity: 50, minStockLevel: 10, unit: 'box',
+  });
+  eq('POST second product -> 201', product2.status, 201);
+
   // Customer in Maharashtra, company in Maharashtra -> CGST + SGST.
   const sale = await api('POST', '/api/sales', {
     customerId: buyer.id,
     items: [
       { productId: product.id, quantity: 2 },
-      { productId: 'PRD-104', quantity: 3 },
+      { productId: product2.body?.data?.id, quantity: 3 },
     ],
     discountType: 'percent',
     discountValue: 10,
@@ -778,14 +867,31 @@ async function run() {
   async function as(roleEmail) {
     const res = await api('POST', '/api/auth/login', {
       email: roleEmail,
-      password: ADMIN_PASSWORD,
+      password: ROLE_PASSWORD,
     });
     return { status: res.status, token: res.body?.data?.token, role: res.body?.data?.user?.role };
   }
 
-  const manager = await as('manager@flowpilot.in');
-  const cashier = await as('cashier@flowpilot.in');
-  const viewer = await as('viewer@flowpilot.in');
+  // Create one account per non-admin role. Run-scoped emails keep re-runs from
+  // colliding on the UNIQUE(email) index; they are deactivated again in
+  // section 13 (there is deliberately no hard delete for accounts).
+  const roleAccounts = [];
+  for (const role of ['MANAGER', 'CASHIER', 'VIEWER']) {
+    const email = `smoke-${role.toLowerCase()}-${RUN}@smoketest.in`;
+    const res = await api('POST', '/api/users', {
+      name: `Smoke ${role}`,
+      email,
+      password: ROLE_PASSWORD,
+      role,
+    });
+    eq(`ADMIN can create a ${role} account`, res.status, 201);
+    createdUsers.add(res.body?.data?.id);
+    roleAccounts.push({ role, email });
+  }
+
+  const manager = await as(roleAccounts.find((r) => r.role === 'MANAGER').email);
+  const cashier = await as(roleAccounts.find((r) => r.role === 'CASHIER').email);
+  const viewer = await as(roleAccounts.find((r) => r.role === 'VIEWER').email);
 
   eq('manager can log in', manager.status, 200);
   eq('cashier can log in', cashier.status, 200);
@@ -853,6 +959,44 @@ async function run() {
   const adminDelete = await api('DELETE', `/api/products/${throwawayId}`);
   eq('ADMIN deleting a product -> 200', adminDelete.status, 200);
 
+  // User administration is ADMIN-only for every other role.
+  for (const [who, expected] of [
+    [manager, 403],
+    [cashier, 403],
+    [viewer, 403],
+  ]) {
+    token = who.token;
+    const res = await api('GET', '/api/users?limit=1');
+    eq(`${who.role} listing users -> ${expected}`, res.status, expected);
+    const write = await api('POST', '/api/users', {
+      name: 'Escalation', email: `escalate-${RUN}@smoketest.in`, password: ROLE_PASSWORD, role: 'ADMIN',
+    });
+    eq(`${who.role} creating a user -> 403`, write.status, 403);
+  }
+
+  token = adminToken;
+  const userList = await api('GET', '/api/users?limit=100');
+  eq('ADMIN can list users', userList.status, 200);
+  check(
+    'the list carries pagination meta',
+    typeof userList.body?.meta?.total === 'number',
+    JSON.stringify(userList.body?.meta)
+  );
+  check(
+    'no password hashes leak from the list',
+    (userList.body?.data ?? []).every((u) => u.passwordHash === undefined && u.password === undefined)
+  );
+
+  // The two rules no caller may break: changing your own role/status.
+  const selfDemote = await api('PATCH', `/api/users/${me.body?.data?.id}`, {
+    role: 'VIEWER',
+  });
+  eq('admin changing own role -> 403', selfDemote.status, 403);
+  const selfDeactivate = await api('PATCH', `/api/users/${me.body?.data?.id}`, {
+    isActive: false,
+  });
+  eq('admin deactivating own account -> 403', selfDeactivate.status, 403);
+
   // -------------------------------------------------------------------------
   section('12. Documentation');
 
@@ -885,17 +1029,33 @@ async function run() {
   eq('DELETE second customer -> 200', delOther.status, 200);
   const delTestProduct = await api('DELETE', `/api/products/${product.id}`);
   eq('DELETE test product -> 200', delTestProduct.status, 200);
+  // `product2` (section 6) also belongs to the run and still references the
+  // category — without this the category delete below answers 409 and the
+  // product baseline never returns to its opening value.
+  const delPaper = await api('DELETE', `/api/products/${product2.body?.data?.id}`);
+  eq('DELETE second test product -> 200', delPaper.status, 200);
   // No delete for `raceId`/`throwawayId`: sections 10 and 11 already soft-delete
   // them, and deleting a tombstoned row again is a 404, not a 200.
   const delCategory2 = await api('DELETE', `/api/categories/${categoryId}`);
   eq('DELETE now-unused category -> 200', delCategory2.status, 200);
 
-  // The seeded baseline must be exactly what the seeder wrote, or the report
-  // assertions above were measuring residue from an earlier run.
-  const leftovers = await api('GET', '/api/invoices?limit=100');
-  eq('seeded invoices restored to 8', leftovers.body?.meta?.total, 8);
-  const leftProducts = await api('GET', '/api/products?limit=100');
-  eq('seeded products restored to 12', leftProducts.body?.meta?.total, 12);
+  // The dataset must be back to exactly what it was when the run started, or
+  // the report assertions above were measuring residue from an earlier run.
+  const leftovers = await api('GET', '/api/invoices?limit=1');
+  eq('invoices restored to the opening baseline', leftovers.body?.meta?.total, baseline.invoices);
+  const leftProducts = await api('GET', '/api/products?limit=1');
+  eq('products restored to the opening baseline', leftProducts.body?.meta?.total, baseline.products);
+
+  // Accounts cannot be hard-deleted (deactivate-only by design), so this run's
+  // role accounts are switched off instead — they hold run-scoped emails, so
+  // they cannot collide with a future run either way.
+  let deactivated = 0;
+  for (const userId of createdUsers) {
+    const res = await api('PATCH', `/api/users/${userId}`, { isActive: false });
+    if (res.status === 200) deactivated += 1;
+    else console.log(`    (could not deactivate user ${userId}: ${res.status})`);
+  }
+  eq('every role account this run created is deactivated', deactivated, createdUsers.size);
 
   // -------------------------------------------------------------------------
   console.log(`\n${'='.repeat(64)}`);

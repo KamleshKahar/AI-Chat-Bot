@@ -15,14 +15,10 @@
     "migrate": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
     "migrate:reset": "prisma migrate reset --force",
-    "db:seed": "prisma db seed",
-    "seed": "node prisma/seed.js",
+    "test": "node --test \"tests/*.test.js\"",
     "smoke-test": "node scripts/smoke-test.js",
     "build": "prisma generate && prisma validate",
     "openapi": "node scripts/dump-openapi.js"
-  },
-  "prisma": {
-    "seed": "node prisma/seed.js"
   },
   "dependencies": {
     "@asteasolutions/zod-to-openapi": "^9.1.0",
